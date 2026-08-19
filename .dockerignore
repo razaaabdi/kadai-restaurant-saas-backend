@@ -1,0 +1,10 @@
+.git
+backend/.gradle
+backend/build
+.idea
+streamlit_app
+frontend/node_modules
+frontend/dist
+scripts
+**/*.md
+**/__pycache__
