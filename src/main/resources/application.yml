@@ -2,18 +2,20 @@ spring:
   application:
     name: restaurant-saas
   datasource:
-    url: jdbc:postgresql://ep-curly-poetry-ayjrm7e1.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require
-    username: restaurant_app
-    password: App_Secret_9x!Npg
+    url: jdbc:postgresql://ep-curly-poetry-ayjrm7e1.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&connectTimeout=10&socketTimeout=60&tcpKeepAlive=true
+    username: neondb_owner
+    password: "npg_m6ctghwTFa4K"
     hikari:
       maximum-pool-size: 10
+      connection-timeout: 15000
+      keepalive-time: 30000
   flyway:
     enabled: true
     user: ${APP_FLYWAY_USER:neondb_owner}
-    password: ${APP_FLYWAY_PASSWORD:npg_m6ctghwTFa4K}
+    password: "${APP_FLYWAY_PASSWORD:npg_m6ctghwTFa4K}"
     locations: classpath:db/migration
     placeholders:
-      app_role_password: ${SPRING_DATASOURCE_PASSWORD:App_Secret_9x!Npg}
+      app_role_password: "${SPRING_DATASOURCE_PASSWORD:App_Secret_9x!Npg}"
   jpa:
     open-in-view: false
     hibernate:
@@ -26,6 +28,8 @@ spring:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}
       port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
+      connect-timeout: 2s
 
 server:
   port: 8080

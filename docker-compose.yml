@@ -9,9 +9,10 @@ services:
       redis:
         condition: service_started
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://ep-curly-poetry-ayjrm7e1.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require
+      SPRING_DATASOURCE_URL: jdbc:postgresql://ep-curly-poetry-ayjrm7e1.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&connectTimeout=10&socketTimeout=60&tcpKeepAlive=true
+      JAVA_TOOL_OPTIONS: -Djava.net.preferIPv6Addresses=false
       SPRING_DATASOURCE_USERNAME: restaurant_app
-      SPRING_DATASOURCE_PASSWORD: App_Secret_9x!Npg
+      SPRING_DATASOURCE_PASSWORD: "App_Secret_9x!Npg"
       APP_FLYWAY_USER: neondb_owner
       APP_FLYWAY_PASSWORD: npg_m6ctghwTFa4K
       SPRING_DATA_REDIS_HOST: redis

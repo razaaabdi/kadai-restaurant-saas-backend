@@ -41,6 +41,8 @@ public class RlsDataSourceConfig {
 	}
 
 	static final class TenantConnection extends DelegatingConnection {
+		private String appliedKey;
+
 		TenantConnection(Connection delegate) { super(delegate); }
 
 		@Override
@@ -76,11 +78,11 @@ public class RlsDataSourceConfig {
 		@Override
 		public void close() throws SQLException {
 			try (Statement st = getDelegate().createStatement()) {
-				st.execute("SELECT set_config('app.current_tenant', '', false)");
-				st.execute("SELECT set_config('app.bootstrap', 'off', false)");
+				st.execute("SELECT set_config('app.current_tenant', '', false), set_config('app.bootstrap', 'off', false)");
 			} catch (SQLException ignored) {
 				// closing anyway
 			}
+			appliedKey = null;
 			super.close();
 		}
 
@@ -92,18 +94,16 @@ public class RlsDataSourceConfig {
 
 		private void applyTenant() throws SQLException {
 			TenantPrincipal p = TenantContext.get();
-			try (Statement st = getDelegate().createStatement()) {
-				if (TenantContext.bootstrap()) {
-					st.execute("SELECT set_config('app.bootstrap', 'on', false)");
-				} else {
-					st.execute("SELECT set_config('app.bootstrap', 'off', false)");
-				}
-				if (p != null && p.tenantId() != null) {
-					st.execute("SELECT set_config('app.current_tenant', '" + p.tenantId() + "', false)");
-				} else {
-					st.execute("SELECT set_config('app.current_tenant', '', false)");
-				}
+			String tenant = (p != null && p.tenantId() != null) ? p.tenantId().toString() : "";
+			String boot = TenantContext.bootstrap() ? "on" : "off";
+			String key = boot + "|" + tenant;
+			if (key.equals(appliedKey)) {
+				return;
 			}
+			try (Statement st = getDelegate().createStatement()) {
+				st.execute("SELECT set_config('app.bootstrap', '" + boot + "', false), set_config('app.current_tenant', '" + tenant + "', false)");
+			}
+			appliedKey = key;
 		}
 	}
 }
