@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: restaurant-saas
+  datasource:
+    url: jdbc:postgresql://localhost:5432/restaurant
+    username: restaurant_app
+    password: app_secret
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    user: ${APP_FLYWAY_USER:restaurant_owner}
+    password: ${APP_FLYWAY_PASSWORD:owner}
+    locations: classpath:db/migration
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET:dev-only-change-me-32-bytes-min-secret}
+    staff-ttl-seconds: 3600
+    refresh-ttl-seconds: 1209600
+    guest-ttl-seconds: 7200
+  public-base: ${APP_PUBLIC_BASE:http://localhost:8080}
+  outbox:
+    poll-ms: 2000
+    max-attempts: 8
