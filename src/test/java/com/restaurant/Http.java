@@ -76,6 +76,15 @@ public class Http {
 		}
 	}
 
+	public ResponseEntity<String> deleteRaw(String path, long version) {
+		try {
+			HttpHeaders h = new HttpHeaders(); h.setBearerAuth(bearer); h.set("If-Match", String.valueOf(version));
+			return http.exchange(base + path, HttpMethod.DELETE, new HttpEntity<>(null, h), String.class);
+		} catch (HttpStatusCodeException e) {
+			return ResponseEntity.status(e.getStatusCode()).headers(e.getResponseHeaders()).body(e.getResponseBodyAsString());
+		}
+	}
+
 	private HttpEntity<String> entity(String json, String idem) {
 		HttpHeaders h = new HttpHeaders();
 		h.setContentType(MediaType.APPLICATION_JSON);

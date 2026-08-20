@@ -19,6 +19,7 @@ import com.restaurant.platform.api.TenantPrincipal;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -58,6 +59,8 @@ public class FloorService {
 	@Transactional
 	public Map<String, Object> createArea(UUID outletId, String name) {
 		requireStaff();
+		requireOutletAccess(outletId);
+		name = normalized(name, "Area name", 80);
 		AreaEntity a = new AreaEntity();
 		a.setTenantId(TenantContext.require().tenantId());
 		a.setOutletId(outletId);
@@ -70,14 +73,55 @@ public class FloorService {
 	public Map<String, Object> createTable(UUID areaId, String code, int seats) {
 		requireStaff();
 		AreaEntity area = areas.findById(areaId).orElseThrow(() -> ApiException.notFound("AREA", "Area not found"));
+		requireOutletAccess(area.getOutletId());
+		code = normalized(code, "Table name", 40);
+		validateSeats(seats);
+		if (tables.existsByOutletIdAndCodeIgnoreCaseAndDeletedFalse(area.getOutletId(), code))
+			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
 		TableEntity t = new TableEntity();
 		t.setTenantId(TenantContext.require().tenantId());
 		t.setOutletId(area.getOutletId());
 		t.setAreaId(areaId);
 		t.setCode(code);
 		t.setSeats(seats);
-		tables.save(t);
+		try { tables.saveAndFlush(t); } catch (DataIntegrityViolationException ex) {
+			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
+		}
 		return issueQr(t);
+	}
+
+	public List<Map<String, Object>> listFloor(UUID outletId) {
+		requireStaff(); requireOutletAccess(outletId);
+		return tables.findByOutletIdAndDeletedFalseOrderByCodeAsc(outletId).stream().map(this::tableView).toList();
+	}
+
+	@Transactional
+	public Map<String, Object> updateTable(UUID tableId, String code, int seats, String status, Long expectedVersion) {
+		requireStaff();
+		TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
+		if (expectedVersion != null && expectedVersion != table.getVersion())
+			throw ApiException.conflict("STALE_TABLE", "The table was changed by another user; refresh and try again");
+		code = normalized(code, "Table name", 40); validateSeats(seats); validateManualStatus(status);
+		if (!table.getCode().equalsIgnoreCase(code) && tables.existsByOutletIdAndCodeIgnoreCaseAndDeletedFalse(table.getOutletId(), code))
+			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
+		if (List.of("OCCUPIED", "BILL_REQUESTED").contains(table.getStatus()) && !table.getStatus().equals(status))
+			throw ApiException.conflict("ACTIVE_ORDER", "An occupied table status is controlled by its active order");
+		table.setCode(code); table.setSeats(seats); table.setStatus(status);
+		try { return tableView(tables.saveAndFlush(table)); } catch (DataIntegrityViolationException ex) {
+			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
+		}
+	}
+
+	@Transactional
+	public void removeTable(UUID tableId, Long expectedVersion) {
+		requireStaff();
+		TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
+		if (expectedVersion != null && expectedVersion != table.getVersion())
+			throw ApiException.conflict("STALE_TABLE", "The table was changed by another user; refresh and try again");
+		if (!"FREE".equals(table.getStatus()))
+			throw ApiException.conflict("TABLE_IN_USE", "Only an available table can be removed");
+		for (QrTokenEntity token : qrTokens.findByTableIdAndActiveTrue(tableId)) { token.setActive(false); qrTokens.save(token); }
+		table.setDeleted(true); tables.save(table);
 	}
 
 	@Transactional
@@ -185,7 +229,14 @@ public class FloorService {
 	}
 
 	public TableEntity table(UUID id) {
-		return tables.findById(id).orElseThrow(() -> ApiException.notFound("TABLE", "Table not found"));
+		return requireActiveTable(id);
+	}
+
+	@Transactional
+	public TableEntity lockForOrder(UUID id) {
+		TableEntity table = tables.findByIdForUpdate(id).orElseThrow(() -> ApiException.notFound("TABLE", "Table not found"));
+		if (table.isDeleted()) throw ApiException.notFound("TABLE", "Table not found");
+		return table;
 	}
 
 	private Map<String, Object> issueQr(TableEntity t) {
@@ -206,6 +257,36 @@ public class FloorService {
 		if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot manage floor");
 	}
 
-	public List<AreaEntity> listAreas(UUID outletId) { return areas.findByOutletId(outletId); }
-	public List<TableEntity> listTables(UUID outletId) { return tables.findByOutletId(outletId); }
+	public List<AreaEntity> listAreas(UUID outletId) { requireStaff(); requireOutletAccess(outletId); return areas.findByOutletId(outletId); }
+	public List<TableEntity> listTables(UUID outletId) { return tables.findByOutletIdAndDeletedFalseOrderByCodeAsc(outletId); }
+
+	private TableEntity requireActiveTable(UUID id) {
+		TableEntity table = tables.findById(id).orElseThrow(() -> ApiException.notFound("TABLE", "Table not found"));
+		if (table.isDeleted()) throw ApiException.notFound("TABLE", "Table not found");
+		return table;
+	}
+
+	private Map<String, Object> tableView(TableEntity table) {
+		Map<String, Object> view = new LinkedHashMap<>();
+		view.put("tableId", table.getId()); view.put("outletId", table.getOutletId()); view.put("areaId", table.getAreaId());
+		view.put("code", table.getCode()); view.put("seats", table.getSeats()); view.put("status", table.getStatus());
+		view.put("qrLocked", table.isQrLocked()); view.put("version", table.getVersion());
+		return view;
+	}
+
+	private void requireOutletAccess(UUID outletId) {
+		TenantPrincipal p = TenantContext.require();
+		if (p.outletIds() == null || !p.outletIds().contains(outletId))
+			throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet");
+		outlet(outletId);
+	}
+
+	private static String normalized(String value, String field, int max) {
+		if (value == null || value.trim().isEmpty()) throw ApiException.bad("VALIDATION", field + " is required");
+		String normalized = value.trim().replaceAll("\\s+", " ");
+		if (normalized.length() > max) throw ApiException.bad("VALIDATION", field + " must be " + max + " characters or fewer");
+		return normalized;
+	}
+	private static void validateSeats(int seats) { if (seats < 1 || seats > 50) throw ApiException.bad("VALIDATION", "Seats must be between 1 and 50"); }
+	private static void validateManualStatus(String status) { if (!List.of("FREE", "RESERVED", "PAID_DIRTY", "OCCUPIED", "BILL_REQUESTED").contains(status)) throw ApiException.bad("VALIDATION", "Unknown table status"); }
 }

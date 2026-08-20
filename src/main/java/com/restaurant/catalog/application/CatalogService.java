@@ -42,7 +42,7 @@ public class CatalogService {
 
 	@Transactional
 	public Map<String, Object> createCategory(UUID outletId, String name) {
-		System.out.println("Creating category for outletId: " + outletId + " with name: " + name);
+		requireStaffOutlet(outletId); name = text(name, "Category", 80, false);
 		CategoryEntity c = new CategoryEntity();
 		c.setTenantId(TenantContext.require().tenantId());
 		c.setOutletId(outletId);
@@ -54,14 +54,22 @@ public class CatalogService {
 	@Transactional
 	public Map<String, Object> createItem(UUID outletId, UUID categoryId, String name, long pricePaise, UUID taxCodeId,
 			boolean availableOnQr) {
-		System.out.println("Creating item for outletId: " + outletId + " with name: " + name);
+		return createItem(outletId, categoryId, name, "", null, pricePaise, taxCodeId, availableOnQr, true);
+	}
+
+	@Transactional
+	public Map<String, Object> createItem(UUID outletId, UUID categoryId, String name, String description, String imageUrl,
+			long pricePaise, UUID taxCodeId, boolean availableOnQr, boolean availableOnCounter) {
+		requireStaffOutlet(outletId); validateItem(categoryId, outletId, name, description, imageUrl, pricePaise);
 		ItemEntity i = new ItemEntity();
 		i.setTenantId(TenantContext.require().tenantId());
 		i.setOutletId(outletId);
 		i.setCategoryId(categoryId);
-		i.setName(name);
+		i.setName(text(name, "Name", 120, false)); i.setDescription(text(description, "Description", 500, true)); i.setImageUrl(image(imageUrl));
 		i.setTaxCodeId(taxCodeId);
 		i.setAvailableOnQr(availableOnQr);
+		i.setAvailableOnCounter(availableOnCounter);
+		i.setEightySixed(!availableOnCounter);
 		items.save(i);
 		VariantEntity v = new VariantEntity();
 		v.setTenantId(i.getId() == null ? TenantContext.require().tenantId() : TenantContext.require().tenantId());
@@ -69,7 +77,31 @@ public class CatalogService {
 		v.setName("Default");
 		v.setPricePaise(pricePaise);
 		variants.save(v);
-		return Map.of("itemId", i.getId(), "variantId", v.getId(), "pricePaise", pricePaise);
+		return itemView(i, v);
+	}
+
+	@Transactional
+	public Map<String, Object> updateItem(UUID itemId, UUID categoryId, String name, String description, String imageUrl,
+			long pricePaise, boolean availableOnQr, boolean availableOnCounter) {
+		ItemEntity item = requireActiveItem(itemId); requireStaffOutlet(item.getOutletId());
+		validateItem(categoryId, item.getOutletId(), name, description, imageUrl, pricePaise);
+		VariantEntity variant = defaultVariant(itemId);
+		item.setCategoryId(categoryId); item.setName(text(name, "Name", 120, false)); item.setDescription(text(description, "Description", 500, true));
+		item.setImageUrl(image(imageUrl)); item.setAvailableOnQr(availableOnQr); item.setAvailableOnCounter(availableOnCounter); item.setEightySixed(!availableOnCounter);
+		variant.setPricePaise(pricePaise); items.save(item); variants.save(variant); return itemView(item, variant);
+	}
+
+	@Transactional
+	public Map<String, Object> setAvailability(UUID itemId, boolean available) {
+		ItemEntity item = requireActiveItem(itemId); requireStaffOutlet(item.getOutletId());
+		item.setAvailableOnCounter(available); item.setAvailableOnQr(available); item.setEightySixed(!available); items.save(item);
+		return itemView(item, defaultVariant(itemId));
+	}
+
+	@Transactional
+	public void deleteItem(UUID itemId) {
+		ItemEntity item = requireActiveItem(itemId); requireStaffOutlet(item.getOutletId());
+		item.setDeleted(true); item.setAvailableOnCounter(false); item.setAvailableOnQr(false); item.setEightySixed(true); items.save(item);
 	}
 
 	@Transactional
@@ -84,13 +116,14 @@ public class CatalogService {
 	}
 
 	public List<Map<String, Object>> channelMenu(UUID outletId, boolean qr) {
+		requireReadableOutlet(outletId);
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (ItemEntity i : items.findByTenantId(TenantContext.require().tenantId())) {
-			if (i.isDeleted() || i.isEightySixed())
+		for (ItemEntity i : items.findByOutletIdAndDeletedFalse(outletId)) {
+			if (i.isDeleted() || (qr && i.isEightySixed()))
 				continue;
 			if (qr && !i.isAvailableOnQr())
 				continue;
-			for (VariantEntity v : variants.findByTenantId(TenantContext.require().tenantId())) {
+			for (VariantEntity v : variants.findByItemId(i.getId())) {
 				if (!v.getItemId().equals(i.getId()))
 					continue;
 				Map<String, Object> row = new LinkedHashMap<>();
@@ -99,10 +132,20 @@ public class CatalogService {
 				row.put("name", i.getName());
 				row.put("variant", v.getName());
 				row.put("pricePaise", v.getPricePaise());
+				row.put("description", i.getDescription()); row.put("image", i.getImageUrl());
+				CategoryEntity category = categories.findById(i.getCategoryId()).orElse(null);
+				row.put("categoryId", i.getCategoryId()); row.put("category", category == null ? "Uncategorized" : category.getName());
+				row.put("available", !i.isEightySixed() && i.isAvailableOnCounter());
 				out.add(row);
 			}
 		}
 		return out;
+	}
+
+	public List<Map<String, Object>> listCategories(UUID outletId) {
+		requireStaffOutlet(outletId);
+		return categories.findByOutletIdAndDeletedFalseOrderBySortOrderAscNameAsc(outletId).stream()
+				.map(category -> Map.<String, Object>of("id", category.getId(), "name", category.getName())).toList();
 	}
 
 	public VariantEntity requireVariant(UUID id) {
@@ -112,6 +155,25 @@ public class CatalogService {
 	public ItemEntity requireItem(UUID id) {
 		return items.findById(id).orElseThrow(() -> ApiException.notFound("ITEM", "Item not found"));
 	}
+
+	private ItemEntity requireActiveItem(UUID id) { ItemEntity item = requireItem(id); if (item.isDeleted()) throw ApiException.notFound("ITEM", "Item not found"); return item; }
+	private VariantEntity defaultVariant(UUID itemId) { return variants.findByItemId(itemId).stream().findFirst().orElseThrow(() -> ApiException.notFound("VARIANT", "Item has no variant")); }
+	private Map<String, Object> itemView(ItemEntity item, VariantEntity variant) {
+		Map<String, Object> row = new LinkedHashMap<>(); CategoryEntity category = categories.findById(item.getCategoryId()).orElse(null);
+		row.put("itemId", item.getId()); row.put("variantId", variant.getId()); row.put("name", item.getName()); row.put("description", item.getDescription());
+		row.put("image", item.getImageUrl()); row.put("categoryId", item.getCategoryId()); row.put("category", category == null ? "Uncategorized" : category.getName());
+		row.put("pricePaise", variant.getPricePaise()); row.put("available", !item.isEightySixed() && item.isAvailableOnCounter()); return row;
+	}
+	private void validateItem(UUID categoryId, UUID outletId, String name, String description, String imageUrl, long pricePaise) {
+		text(name, "Name", 120, false); text(description, "Description", 500, true); image(imageUrl);
+		if (pricePaise <= 0 || pricePaise > 100_000_000L) throw ApiException.bad("VALIDATION", "Price must be between 1 and 100000000 paise");
+		CategoryEntity category = categories.findById(categoryId).orElseThrow(() -> ApiException.notFound("CATEGORY", "Category not found"));
+		if (category.isDeleted() || !outletId.equals(category.getOutletId())) throw ApiException.bad("CATEGORY_OUTLET", "Category does not belong to this outlet");
+	}
+	private static String text(String value, String field, int max, boolean optional) { if (value == null) value = ""; value = value.trim(); if (!optional && value.isEmpty()) throw ApiException.bad("VALIDATION", field + " is required"); if (value.length() > max) throw ApiException.bad("VALIDATION", field + " must be " + max + " characters or fewer"); return value; }
+	private static String image(String value) { if (value == null || value.isBlank()) return null; value = value.trim(); if (value.length() > 2048 || !(value.startsWith("https://") || value.startsWith("http://"))) throw ApiException.bad("VALIDATION", "Image must be a valid HTTP(S) URL"); return value; }
+	private static void requireStaffOutlet(UUID outletId) { var p = TenantContext.require(); if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot manage the menu"); if (p.outletIds() == null || !p.outletIds().contains(outletId)) throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet"); }
+	private static void requireReadableOutlet(UUID outletId) { var p = TenantContext.require(); if (p.isGuest()) { if (!outletId.equals(p.outletId())) throw ApiException.forbidden("OUTLET_ACCESS", "Wrong outlet"); } else if (p.outletIds() == null || !p.outletIds().contains(outletId)) throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet"); }
 
 	public TaxCodeEntity tax(UUID id) {
 		return id == null ? null : taxes.findById(id).orElse(null);

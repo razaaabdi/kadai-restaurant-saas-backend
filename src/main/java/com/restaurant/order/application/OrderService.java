@@ -86,6 +86,20 @@ public class OrderService {
 	}
 
 	@Transactional
+	public Map<String, Object> addStaffRound(UUID orderId, List<Map<String, Object>> items) {
+		TenantPrincipal p = TenantContext.require(); if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot use the staff order API");
+		OrderEntity order = requireOwn(orderId);
+		if (!OrderStatus.open(order.getStatus())) throw ApiException.conflict("ORDER_CLOSED", "This order is already closed");
+		return addRoundInternal(order.getOutletId(), order.getTableId(), order.getChannel(), items, true);
+	}
+
+	public Map<String, Object> activeForTable(UUID outletId, UUID tableId) {
+		TenantPrincipal p = TenantContext.require(); if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot use the staff order API");
+		OrderEntity order = openForTable(outletId, tableId);
+		if (order == null) throw ApiException.notFound("ORDER", "No active order for this table"); return toView(order);
+	}
+
+	@Transactional
 	public Map<String, Object> requestBill(UUID orderId, boolean generate, long discountPaise) {
 		OrderEntity o = requireOwn(orderId);
 		TenantPrincipal p = TenantContext.require();
@@ -199,6 +213,12 @@ public class OrderService {
 	private Map<String, Object> addRoundInternal(UUID outletId, UUID tableId, String channel, List<Map<String, Object>> items,
 			boolean autoConfirm) {
 		TenantPrincipal p = TenantContext.require();
+		if (items == null || items.isEmpty()) throw ApiException.bad("EMPTY_ORDER", "Add at least one item");
+		if (items.size() > 100) throw ApiException.bad("TOO_MANY_ITEMS", "An order round can contain at most 100 items");
+		if (tableId != null) {
+			var table = floor.lockForOrder(tableId);
+			if (!outletId.equals(table.getOutletId())) throw ApiException.bad("TABLE_OUTLET", "Table does not belong to this outlet");
+		}
 		OrderEntity o = tableId == null ? null : openForTable(outletId, tableId);
 		boolean created = false;
 		if (o == null) {

@@ -85,6 +85,18 @@ public class OrderController {
 		return orders.get(orderId);
 	}
 
+	@GetMapping("/outlets/{outletId}/tables/{tableId}/active-order")
+	public Map<String, Object> active(@PathVariable UUID outletId, @PathVariable UUID tableId) { return orders.activeForTable(outletId, tableId); }
+
+	@PostMapping("/orders/{orderId}/rounds")
+	public ResponseEntity<String> addRound(@PathVariable UUID orderId, @RequestHeader("Idempotency-Key") String key, @RequestBody String raw) {
+		return idempotency.run(TenantContext.require().tenantId(), key, raw, () -> {
+			Map<String, Object> body = read(raw);
+			@SuppressWarnings("unchecked") List<Map<String, Object>> items = (List<Map<String, Object>>) body.get("items");
+			return json(orders.addStaffRound(orderId, items));
+		});
+	}
+
 	@PostMapping("/orders/{orderId}/request-bill")
 	public ResponseEntity<String> bill(@PathVariable UUID orderId,
 			@RequestHeader("Idempotency-Key") String key,

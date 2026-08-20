@@ -28,6 +28,27 @@ public class FloorController {
 		return floor.createTable(areaId, String.valueOf(body.get("code")), seats);
 	}
 
+	@GetMapping("/outlets/{outletId}/tables")
+	public java.util.List<Map<String, Object>> tables(@PathVariable UUID outletId) { return floor.listFloor(outletId); }
+
+	@GetMapping("/outlets/{outletId}/areas")
+	public java.util.List<Map<String, Object>> areas(@PathVariable UUID outletId) {
+		return floor.listAreas(outletId).stream().map(area -> Map.<String, Object>of("id", area.getId(), "name", area.getName(), "outletId", area.getOutletId())).toList();
+	}
+
+	@PutMapping("/tables/{tableId}")
+	public Map<String, Object> update(@PathVariable UUID tableId, @RequestHeader(value = "If-Match", required = false) Long version,
+			@RequestBody Map<String, Object> body) {
+		if (!(body.get("seats") instanceof Number seats)) throw com.restaurant.platform.api.ApiException.bad("VALIDATION", "Seats must be a number");
+		return floor.updateTable(tableId, body.get("code") == null ? null : body.get("code").toString(), seats.intValue(),
+				body.get("status") == null ? "FREE" : body.get("status").toString(), version);
+	}
+
+	@DeleteMapping("/tables/{tableId}")
+	public ResponseEntity<Void> delete(@PathVariable UUID tableId, @RequestHeader(value = "If-Match", required = false) Long version) {
+		floor.removeTable(tableId, version); return ResponseEntity.noContent().build();
+	}
+
 	@PostMapping("/tables/{tableId}/rotate-qr")
 	public Map<String, Object> rotate(@PathVariable UUID tableId) {
 		return floor.rotateQr(tableId);

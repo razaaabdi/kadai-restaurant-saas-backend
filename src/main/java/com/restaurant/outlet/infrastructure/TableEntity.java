@@ -18,6 +18,7 @@ public class TableEntity {
 	private int seats = 4;
 	private String status = "FREE";
 	private boolean qrLocked;
+	private boolean deleted;
 	@Version private long version;
 
 	public UUID getId() { return id; }
@@ -36,4 +37,6 @@ public class TableEntity {
 	public boolean isQrLocked() { return qrLocked; }
 	public void setQrLocked(boolean qrLocked) { this.qrLocked = qrLocked; }
 	public long getVersion() { return version; }
+	public boolean isDeleted() { return deleted; }
+	public void setDeleted(boolean deleted) { this.deleted = deleted; }
 }
