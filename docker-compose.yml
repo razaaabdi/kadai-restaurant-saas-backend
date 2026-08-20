@@ -19,7 +19,7 @@ services:
     ports:
       - "127.0.0.1:6380:6379"
   api:
-    build: ./backend
+    build: .
     depends_on:
       postgres:
         condition: service_healthy

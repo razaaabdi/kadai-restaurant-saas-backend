@@ -2,16 +2,15 @@ spring:
   application:
     name: restaurant-saas
   datasource:
-    url: jdbc:postgresql://localhost:5432/restaurant
+    url: jdbc:postgresql://ep-curly-poetry-ayjrm7e1.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require
     username: restaurant_app
-    password: app_secret
-    hikari:
-      maximum-pool-size: 10
+    password: App_Secret_9x!Npg
   flyway:
-    enabled: true
-    user: ${APP_FLYWAY_USER:restaurant_owner}
-    password: ${APP_FLYWAY_PASSWORD:owner}
+    user: neondb_owner
+    password: npg_m6ctghwTFa4K
     locations: classpath:db/migration
+    placeholders:
+      app_role_password: ${SPRING_DATASOURCE_PASSWORD:app_secret}
   jpa:
     open-in-view: false
     hibernate:

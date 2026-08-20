@@ -2,7 +2,7 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'restaurant_app') THEN
-    CREATE ROLE restaurant_app LOGIN PASSWORD 'app_secret' NOSUPERUSER NOBYPASSRLS;
+    CREATE ROLE restaurant_app LOGIN PASSWORD '${app_role_password}' NOSUPERUSER NOBYPASSRLS;
   END IF;
 END
 $$;

@@ -42,6 +42,7 @@ public class CatalogService {
 
 	@Transactional
 	public Map<String, Object> createCategory(UUID outletId, String name) {
+		System.out.println("Creating category for outletId: " + outletId + " with name: " + name);
 		CategoryEntity c = new CategoryEntity();
 		c.setTenantId(TenantContext.require().tenantId());
 		c.setOutletId(outletId);
@@ -53,6 +54,7 @@ public class CatalogService {
 	@Transactional
 	public Map<String, Object> createItem(UUID outletId, UUID categoryId, String name, long pricePaise, UUID taxCodeId,
 			boolean availableOnQr) {
+		System.out.println("Creating item for outletId: " + outletId + " with name: " + name);
 		ItemEntity i = new ItemEntity();
 		i.setTenantId(TenantContext.require().tenantId());
 		i.setOutletId(outletId);
