@@ -12,6 +12,8 @@ spring:
     user: ${APP_FLYWAY_USER:restaurant_owner}
     password: ${APP_FLYWAY_PASSWORD:owner}
     locations: classpath:db/migration
+    placeholders:
+      app_role_password: ${SPRING_DATASOURCE_PASSWORD:app_secret}
   jpa:
     open-in-view: false
     hibernate:

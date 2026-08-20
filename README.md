@@ -1,6 +1,6 @@
-# Restaurant SaaS (backend MVP)
+# Restaurant SaaS
 
-Java 25 + Spring Boot 4.1 modular monolith. Money in paise (`long`). Qty `NUMERIC(19,4)`.
+Java 25 + Spring Boot 4.1 modular monolith backend with a Streamlit UI. Money in paise (`long`). Qty `NUMERIC(19,4)`.
 
 ## Run tests
 
@@ -9,36 +9,81 @@ cd backend
 ./gradlew test
 ```
 
-Docker required (Testcontainers: Postgres 17 + Redis 7).
+Docker is required for the integration test stack and the easiest local startup path.
 
-## Run (Docker: API + Kadai POS + Postgres + Redis)
+## Run With Docker
+
+macOS / Linux:
 
 ```bash
 ./scripts/dev-up.sh
 ```
 
-UI http://localhost:8501 · API http://localhost:8080 · Postgres host `127.0.0.1:5433` · Redis host `127.0.0.1:6380` · stop: `./scripts/dev-down.sh`
+Windows PowerShell:
 
-The active UI is a Vite React app in `frontend/`; the Spring Boot API is in `backend/`. Compose serves the frontend through nginx on **8501** and proxies `/api` → `api:8080`.
-
-### Local Vite (API already on :8080)
-
-```bash
-cd frontend && npm install && npm run dev
+```powershell
+.\scripts\dev-up.ps1
 ```
 
-Vite http://localhost:5173 proxies `/api` → `http://localhost:8080`. Guest QR route: `/t/:token`. Staff: `/login` then Floor / Menu / Orders / Kitchen / Billing / Inventory / Reports / Settings.
+UI http://localhost:8501 · API http://localhost:8080 · Postgres host `127.0.0.1:5433` · Redis host `127.0.0.1:6380`
 
-Compose publishes Postgres `5433→5432` and Redis `6380→6379` so they do not clash with local services. The `api` container still uses `postgres:5432` and `redis:6379` on the Docker network.
+Stop:
 
-## Run locally (Gradle, infra only in Docker)
+```bash
+./scripts/dev-down.sh
+```
+
+```powershell
+.\scripts\dev-down.ps1
+```
+
+Compose starts:
+- `backend/` as the Spring Boot API on `:8080`
+- `streamlit_app/` as the UI on `:8501`
+- Postgres 17 on host port `5433`
+- Redis 7 on host port `6380`
+
+The UI talks to the API through `API_BASE_URL`, which Compose points at `http://api:8080`.
+
+## Run Locally Without Docker UI
+
+First start only the infra containers:
 
 ```bash
 docker compose up postgres redis -d
-# create restaurant_app via Flyway on first api boot; set APP_FLYWAY_USER=restaurant_owner
-# host ports are 5433/6380 (container ports stay 5432/6379)
+```
+
+Then start the backend with Java 25:
+
+```bash
+cd backend
 SPRING_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:5433/restaurant \
 SPRING_DATA_REDIS_PORT=6380 \
-cd backend
+APP_FLYWAY_USER=restaurant_owner \
+APP_FLYWAY_PASSWORD=owner \
 ./gradlew bootRun
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:SPRING_DATASOURCE_URL="jdbc:postgresql://127.0.0.1:5433/restaurant"
+$env:SPRING_DATA_REDIS_PORT="6380"
+$env:APP_FLYWAY_USER="restaurant_owner"
+$env:APP_FLYWAY_PASSWORD="owner"
+cd backend
+.\gradlew.bat bootRun
+```
+
+Then start the Streamlit UI:
+
+```bash
+python -m pip install -r streamlit_app/requirements-ui.txt
+streamlit run streamlit_app/Home.py
+```
+
+Optional:
+
+```bash
+API_BASE_URL=http://localhost:8080 streamlit run streamlit_app/Home.py
 ```
