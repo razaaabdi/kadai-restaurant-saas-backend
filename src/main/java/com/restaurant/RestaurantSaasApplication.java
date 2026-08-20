@@ -9,6 +9,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 @EnableConfigurationProperties(AppProperties.class)
 public class RestaurantSaasApplication {
 	public static void main(String[] args) {
+		System.setProperty("java.net.preferIPv6Addresses", "false");
 		SpringApplication.run(RestaurantSaasApplication.class, args);
 	}
 }
