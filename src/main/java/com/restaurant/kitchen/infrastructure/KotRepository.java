@@ -8,4 +8,5 @@ import java.util.UUID;
 public interface KotRepository extends JpaRepository<KotEntity, UUID> {
 	List<KotEntity> findByOrderId(UUID orderId);
 	List<KotEntity> findByOutletIdAndStatus(UUID outletId, String status);
+	java.util.Optional<KotEntity> findByRoundId(UUID roundId);
 }

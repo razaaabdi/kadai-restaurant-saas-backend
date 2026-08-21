@@ -5,4 +5,5 @@ import java.util.List;
 import java.util.UUID;
 public interface AreaRepository extends JpaRepository<AreaEntity, UUID> {
 	List<AreaEntity> findByOutletId(UUID outletId);
+	boolean existsByOutletIdAndNameIgnoreCase(UUID outletId, String name);
 }

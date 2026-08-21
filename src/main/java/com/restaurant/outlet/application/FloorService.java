@@ -58,15 +58,19 @@ public class FloorService {
 
 	@Transactional
 	public Map<String, Object> createArea(UUID outletId, String name) {
-		requireStaff();
+		requireFloorManager();
 		requireOutletAccess(outletId);
 		name = normalized(name, "Area name", 80);
+		if (areas.existsByOutletIdAndNameIgnoreCase(outletId, name))
+			throw ApiException.conflict("AREA_NAME_EXISTS", "An area with this name already exists");
 		AreaEntity a = new AreaEntity();
 		a.setTenantId(TenantContext.require().tenantId());
 		a.setOutletId(outletId);
 		a.setName(name);
-		areas.save(a);
-		return Map.of("id", a.getId(), "name", name);
+		try { areas.saveAndFlush(a); } catch (DataIntegrityViolationException ex) {
+			throw ApiException.conflict("AREA_NAME_EXISTS", "An area with this name already exists");
+		}
+		return Map.of("id", a.getId(), "name", name, "outletId", outletId, "tables", List.of());
 	}
 
 	@Transactional
@@ -95,13 +99,25 @@ public class FloorService {
 		return tables.findByOutletIdAndDeletedFalseOrderByCodeAsc(outletId).stream().map(this::tableView).toList();
 	}
 
+	public Map<String, Object> floorLayout(UUID outletId) {
+		requireStaff(); requireOutletAccess(outletId);
+		List<TableEntity> floorTables = tables.findByOutletIdAndDeletedFalseOrderByCodeAsc(outletId);
+		List<Map<String, Object>> grouped = areas.findByOutletId(outletId).stream().map(area -> {
+			Map<String, Object> view = new LinkedHashMap<>();
+			view.put("id", area.getId()); view.put("name", area.getName()); view.put("outletId", area.getOutletId());
+			view.put("tables", floorTables.stream().filter(table -> area.getId().equals(table.getAreaId())).map(this::tableView).toList());
+			return view;
+		}).toList();
+		return Map.of("outletId", outletId, "areas", grouped);
+	}
+
 	@Transactional
 	public Map<String, Object> updateTable(UUID tableId, String code, int seats, String status, Long expectedVersion) {
 		requireStaff();
 		TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
 		if (expectedVersion != null && expectedVersion != table.getVersion())
 			throw ApiException.conflict("STALE_TABLE", "The table was changed by another user; refresh and try again");
-		code = normalized(code, "Table name", 40); validateSeats(seats); validateManualStatus(status);
+		code = normalized(code, "Table name", 40); validateSeats(seats); status = status == null ? table.getStatus() : status; validateManualStatus(status);
 		if (!table.getCode().equalsIgnoreCase(code) && tables.existsByOutletIdAndCodeIgnoreCaseAndDeletedFalse(table.getOutletId(), code))
 			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
 		if (List.of("OCCUPIED", "BILL_REQUESTED").contains(table.getStatus()) && !table.getStatus().equals(status))
@@ -157,9 +173,31 @@ public class FloorService {
 	}
 
 	@Transactional
+	public void markPaymentPending(UUID tableId){
+		if(tableId==null)return;String status=tables.statusOf(tableId);if(status==null)throw ApiException.notFound("TABLE","Table not found");
+		if("BILL_REQUESTED".equals(status))tables.updateStatus(tableId,"OCCUPIED");
+	}
+
+	@Transactional
 	public void markPaidDirty(UUID tableId) {
 		if (tableId == null) return;
-		tables.updateStatus(tableId, "PAID_DIRTY");
+		tables.updateStatus(tableId, "CLEANING_REQUIRED");
+	}
+
+	@Transactional
+	public void startCleaning(UUID tableId) {
+		requireStaff(); TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
+		if ("CLEANING".equals(table.getStatus())) return;
+		if (!"CLEANING_REQUIRED".equals(table.getStatus())) throw ApiException.conflict("TABLE_TRANSITION", "Only a table awaiting cleaning can start cleaning");
+		table.setStatus("CLEANING"); tables.save(table);
+	}
+
+	@Transactional
+	public void completeCleaning(UUID tableId) {
+		requireStaff(); TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
+		if ("FREE".equals(table.getStatus())) return;
+		if (!"CLEANING".equals(table.getStatus())) throw ApiException.conflict("TABLE_TRANSITION", "Cleaning must be started before it can be completed");
+		table.setStatus("FREE"); tables.save(table);
 	}
 
 	@Transactional
@@ -257,6 +295,12 @@ public class FloorService {
 		if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot manage floor");
 	}
 
+	private void requireFloorManager() {
+		TenantPrincipal p = TenantContext.require();
+		if (!(p.hasRole("OWNER") || p.hasRole("MANAGER")))
+			throw ApiException.forbidden("FLOOR_AREA_MANAGE", "Only an owner or manager can create dining areas");
+	}
+
 	public List<AreaEntity> listAreas(UUID outletId) { requireStaff(); requireOutletAccess(outletId); return areas.findByOutletId(outletId); }
 	public List<TableEntity> listTables(UUID outletId) { return tables.findByOutletIdAndDeletedFalseOrderByCodeAsc(outletId); }
 
@@ -288,5 +332,5 @@ public class FloorService {
 		return normalized;
 	}
 	private static void validateSeats(int seats) { if (seats < 1 || seats > 50) throw ApiException.bad("VALIDATION", "Seats must be between 1 and 50"); }
-	private static void validateManualStatus(String status) { if (!List.of("FREE", "RESERVED", "PAID_DIRTY", "OCCUPIED", "BILL_REQUESTED").contains(status)) throw ApiException.bad("VALIDATION", "Unknown table status"); }
+	private static void validateManualStatus(String status) { if (!List.of("FREE", "RESERVED", "PAID_DIRTY", "CLEANING_REQUIRED", "CLEANING", "OCCUPIED", "BILL_REQUESTED", "OUT_OF_SERVICE").contains(status)) throw ApiException.bad("VALIDATION", "Unknown table status"); }
 }

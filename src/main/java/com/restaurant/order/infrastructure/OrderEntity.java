@@ -16,6 +16,8 @@ public class OrderEntity {
 	private UUID tableId;
 	private String channel;
 	private String status;
+	private UUID assignedWaiterId;
+	private int guestCount = 1;
 	private boolean guestFrozen;
 	private long subtotalPaise;
 	private long discountPaise;
@@ -36,6 +38,11 @@ public class OrderEntity {
 	public void setChannel(String channel) { this.channel = channel; }
 	public String getStatus() { return status; }
 	public void setStatus(String status) { this.status = status; }
+	public UUID getAssignedWaiterId() { return assignedWaiterId; }
+	public void setAssignedWaiterId(UUID assignedWaiterId) { this.assignedWaiterId = assignedWaiterId; }
+	public int getGuestCount() { return guestCount; }
+	public void setGuestCount(int guestCount) { this.guestCount = guestCount; }
+	public Instant getCreatedAt() { return createdAt; }
 	public boolean isGuestFrozen() { return guestFrozen; }
 	public void setGuestFrozen(boolean guestFrozen) { this.guestFrozen = guestFrozen; }
 	public long getSubtotalPaise() { return subtotalPaise; }

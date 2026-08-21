@@ -123,6 +123,9 @@ public class OrderController {
 		return orders.illegalPatch(orderId, body.get("status"));
 	}
 
+	@PostMapping("/outlets/{outletId}/orders/{orderId}/close")
+	public ResponseEntity<String> close(@PathVariable UUID outletId,@PathVariable UUID orderId,@RequestHeader("Idempotency-Key") String key){return idempotency.run(TenantContext.require().tenantId(),key,orderId.toString(),()->json(orders.close(outletId,orderId)));}
+
 	private static ResponseEntity<String> json(Map<String, Object> body) {
 		StringBuilder sb = new StringBuilder("{");
 		boolean first = true;

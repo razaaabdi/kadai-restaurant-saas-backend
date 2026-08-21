@@ -7,4 +7,5 @@ import java.util.UUID;
 
 public interface OrderLineRepository extends JpaRepository<OrderLineEntity, UUID> {
 	List<OrderLineEntity> findByOrderId(UUID orderId);
+	List<OrderLineEntity> findByRoundId(UUID roundId);
 }

@@ -76,7 +76,8 @@ public class BillingFacade {
 	@Transactional
 	public void markPaid(UUID invoiceId) {
 		InvoiceEntity inv = invoices.findById(invoiceId).orElseThrow();
-		inv.setStatus("PAID");
+		// Invoice generation and payment are separate domains. Successful payments remain authoritative in payments.
+		inv.setStatus("GENERATED");
 		invoices.save(inv);
 	}
 

@@ -14,7 +14,7 @@ public class InvoiceEntity {
 	private UUID tenantId;
 	private UUID outletId;
 	private UUID orderId;
-	private String status = "OPEN";
+	private String status = "GENERATED";
 	private long subtotalPaise;
 	private long discountPaise;
 	private long serviceChargePaise;
@@ -33,6 +33,9 @@ public class InvoiceEntity {
 	public long getSubtotalPaise() { return subtotalPaise; }
 	public long getDiscountPaise() { return discountPaise; }
 	public long getTaxPaise() { return taxPaise; }
+	public long getServiceChargePaise(){return serviceChargePaise;}
+	public long getPackagingPaise(){return packagingPaise;}
+	public long getRoundingPaise(){return roundingPaise;}
 	public UUID getOutletId() { return outletId; }
 	public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
 	public void setOutletId(UUID outletId) { this.outletId = outletId; }

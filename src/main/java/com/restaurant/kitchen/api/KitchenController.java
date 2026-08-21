@@ -34,6 +34,12 @@ public class KitchenController {
 		return ResponseEntity.noContent().build();
 	}
 
+	@PostMapping("/kots/{kotId}/accept")
+	public ResponseEntity<Void> accept(@PathVariable UUID kotId) { kitchen.accept(kotId); return ResponseEntity.noContent().build(); }
+
+	@PostMapping("/kots/{kotId}/items/{itemId}/mark-ready")
+	public ResponseEntity<Void> itemReady(@PathVariable UUID kotId, @PathVariable UUID itemId) { kitchen.markItemReady(kotId, itemId); return ResponseEntity.noContent().build(); }
+
 	@PostMapping("/kots/{kotId}/mark-ready")
 	public ResponseEntity<Void> ready(@PathVariable UUID kotId) {
 		kitchen.markReady(kotId);

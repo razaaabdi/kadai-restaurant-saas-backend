@@ -15,6 +15,9 @@ import com.restaurant.order.infrastructure.OrderLineRepository;
 import com.restaurant.order.infrastructure.OrderRepository;
 import com.restaurant.order.infrastructure.OrderRoundEntity;
 import com.restaurant.order.infrastructure.OrderRoundRepository;
+import com.restaurant.payment.infrastructure.PaymentEntity;
+import com.restaurant.payment.infrastructure.PaymentRepository;
+import com.restaurant.kitchen.infrastructure.KotRepository;
 import com.restaurant.outlet.api.QrLookup;
 import com.restaurant.outlet.application.FloorService;
 import com.restaurant.outlet.infrastructure.OutletEntity;
@@ -24,6 +27,9 @@ import com.restaurant.platform.api.KotStatusChanged;
 import com.restaurant.platform.api.Money;
 import com.restaurant.platform.api.Quantity;
 import com.restaurant.platform.api.RoundConfirmed;
+import com.restaurant.platform.api.OrderClosed;
+import com.restaurant.platform.api.AuditWriter;
+import com.restaurant.platform.api.OutboxPublisher;
 import com.restaurant.platform.api.TenantContext;
 import com.restaurant.platform.api.TenantPrincipal;
 import org.springframework.context.ApplicationEventPublisher;
@@ -49,10 +55,14 @@ public class OrderService {
 	private final FloorService floor;
 	private final BillingFacade billing;
 	private final ApplicationEventPublisher events;
+	private final PaymentRepository payments;
+	private final KotRepository kots;
+	private final AuditWriter audit;
+	private final OutboxPublisher outbox;
 
 	public OrderService(OrderRepository orders, OrderRoundRepository rounds, OrderLineRepository lines,
 			OrderLineModifierRepository lineMods, CatalogService catalog, InventoryFacade inventory,
-			FloorService floor, BillingFacade billing, ApplicationEventPublisher events) {
+			FloorService floor, BillingFacade billing, ApplicationEventPublisher events,PaymentRepository payments,KotRepository kots,AuditWriter audit,OutboxPublisher outbox) {
 		this.orders = orders;
 		this.rounds = rounds;
 		this.lines = lines;
@@ -62,6 +72,7 @@ public class OrderService {
 		this.floor = floor;
 		this.billing = billing;
 		this.events = events;
+		this.payments=payments;this.kots=kots;this.audit=audit;this.outbox=outbox;
 	}
 
 	@Transactional
@@ -89,6 +100,7 @@ public class OrderService {
 	public Map<String, Object> addStaffRound(UUID orderId, List<Map<String, Object>> items) {
 		TenantPrincipal p = TenantContext.require(); if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot use the staff order API");
 		OrderEntity order = requireOwn(orderId);
+		requireAssignedWaiterOrManager(order, p);
 		if (!OrderStatus.open(order.getStatus())) throw ApiException.conflict("ORDER_CLOSED", "This order is already closed");
 		return addRoundInternal(order.getOutletId(), order.getTableId(), order.getChannel(), items, true);
 	}
@@ -118,7 +130,7 @@ public class OrderService {
 		o.setGuestFrozen(true);
 		orders.save(o);
 		if (o.getTableId() != null) floor.markBillRequested(o.getTableId());
-		if (generate || !p.isGuest()) {
+		if (generate) {
 			return invoiceFrom(o, discountPaise);
 		}
 		return toView(o);
@@ -183,6 +195,7 @@ public class OrderService {
 	@Transactional
 	public void onKot(KotStatusChanged ev) {
 		orders.findById(ev.orderId()).ifPresent(o -> {
+			if ("ACCEPTED".equals(ev.kotStatus())) lines.findByRoundId(ev.roundId()).forEach(line -> { if ("SENT_TO_KITCHEN".equals(line.getFulfilmentStatus())) { line.setFulfilmentStatus("ACCEPTED"); lines.save(line); } });
 			if ("PREPARING".equals(ev.kotStatus()) && OrderStatus.KOT_SENT.equals(o.getStatus())) {
 				OrderStatus.assertTransition(o.getStatus(), OrderStatus.PREPARING);
 				o.setStatus(OrderStatus.PREPARING);
@@ -203,11 +216,32 @@ public class OrderService {
 			OrderStatus.assertTransition(o.getStatus(), OrderStatus.PAID);
 			o.setStatus(OrderStatus.PAID);
 			orders.save(o);
-			OrderStatus.assertTransition(o.getStatus(), OrderStatus.COMPLETED);
-			o.setStatus(OrderStatus.COMPLETED);
-			orders.save(o);
-			if (o.getTableId() != null) floor.markPaidDirty(o.getTableId());
 		}
+		// A fully paid dine-in order no longer needs a second manual close action.
+		// Only release it to cleaning after every kitchen/service task is terminal.
+		if (OrderStatus.PAID.equals(o.getStatus()) && serviceIsComplete(o.getId())) {
+			completePaidOrder(o);
+		}
+	}
+
+	@Transactional
+	public Map<String,Object> close(UUID outletId,UUID orderId){
+		TenantPrincipal p=TenantContext.require();if(p.isGuest()||!(p.hasRole("OWNER")||p.hasRole("MANAGER")||p.hasRole("SHIFT_MANAGER")||p.hasRole("CASHIER")))throw ApiException.forbidden("ORDER_CLOSE","You do not have permission to close paid orders");
+		OrderEntity o=requireOwn(orderId);if(!outletId.equals(o.getOutletId()))throw ApiException.bad("ORDER_OUTLET","Order does not belong to this outlet");
+		if(OrderStatus.COMPLETED.equals(o.getStatus()))return toView(o);if(!OrderStatus.PAID.equals(o.getStatus()))throw ApiException.conflict("ORDER_NOT_PAID","Complete payment before closing this order");
+		var invoice=billing.byOrder(orderId);long paid=payments.findByInvoiceId(invoice.getId()).stream().filter(x->"SUCCESS".equals(x.getStatus())).mapToLong(PaymentEntity::getAmountPaise).sum();if(paid<invoice.getTotalPaise())throw ApiException.conflict("PAYMENT_INCOMPLETE","The invoice still has an outstanding balance");
+		if(lines.findByOrderId(orderId).stream().anyMatch(line->!List.of("SERVED","CANCELLED").contains(line.getFulfilmentStatus())))throw ApiException.conflict("SERVICE_INCOMPLETE","Serve or cancel every item before closing the order");
+		if(kots.findByOrderId(orderId).stream().anyMatch(kot->!List.of("SERVED","CANCELLED").contains(kot.getStatus())))throw ApiException.conflict("KITCHEN_INCOMPLETE","Kitchen or service work is still active");
+		completePaidOrder(o);return toView(o);
+	}
+
+	private boolean serviceIsComplete(UUID orderId) {
+		return lines.findByOrderId(orderId).stream().allMatch(line -> List.of("SERVED", "CANCELLED").contains(line.getFulfilmentStatus()))
+				&& kots.findByOrderId(orderId).stream().allMatch(kot -> List.of("SERVED", "CANCELLED").contains(kot.getStatus()));
+	}
+
+	private void completePaidOrder(OrderEntity o) {
+		OrderStatus.assertTransition(o.getStatus(),OrderStatus.COMPLETED);o.setStatus(OrderStatus.COMPLETED);orders.save(o);if(o.getTableId()!=null)floor.markPaidDirty(o.getTableId());audit.write("ORDER_CLOSED","ORDER",o.getId(),"table="+o.getTableId());outbox.publish(o.getTenantId(),"OrderClosed","{\"orderId\":\""+o.getId()+"\",\"outletId\":\""+o.getOutletId()+"\",\"tableId\":\""+o.getTableId()+"\"}");events.publishEvent(new OrderClosed(o.getTenantId(),o.getOutletId(),o.getId(),o.getTableId()));
 	}
 
 	private Map<String, Object> addRoundInternal(UUID outletId, UUID tableId, String channel, List<Map<String, Object>> items,
@@ -215,20 +249,25 @@ public class OrderService {
 		TenantPrincipal p = TenantContext.require();
 		if (items == null || items.isEmpty()) throw ApiException.bad("EMPTY_ORDER", "Add at least one item");
 		if (items.size() > 100) throw ApiException.bad("TOO_MANY_ITEMS", "An order round can contain at most 100 items");
-		if (tableId != null) {
-			var table = floor.lockForOrder(tableId);
-			if (!outletId.equals(table.getOutletId())) throw ApiException.bad("TABLE_OUTLET", "Table does not belong to this outlet");
-		}
+		var table = tableId == null ? null : floor.lockForOrder(tableId);
+		if (table != null && !outletId.equals(table.getOutletId()))
+			throw ApiException.bad("TABLE_OUTLET", "Table does not belong to this outlet");
 		OrderEntity o = tableId == null ? null : openForTable(outletId, tableId);
 		boolean created = false;
 		if (o == null) {
+			if (table != null && !"FREE".equals(table.getStatus()))
+				throw ApiException.conflict("TABLE_UNAVAILABLE", "This table is not available for a new order");
 			o = new OrderEntity();
 			o.setTenantId(p.tenantId());
 			o.setOutletId(outletId);
 			o.setTableId(tableId);
 			o.setChannel(channel);
 			o.setStatus(OrderStatus.DRAFT);
+			o.setAssignedWaiterId(p.userId());
 			orders.save(o);
+			if (tableId != null && p.userId() != null) {
+				events.publishEvent(new com.restaurant.platform.api.DineInOrderOpened(p.tenantId(), outletId, tableId, o.getId(), p.userId()));
+			}
 			created = true;
 		} else if (o.isGuestFrozen()) {
 			throw ApiException.conflict("FROZEN", "Bill requested; cannot add");
@@ -243,12 +282,24 @@ public class OrderService {
 		OutletEntity outlet = floor.outlet(outletId);
 		long added = 0;
 		List<UUID> recipeIds = new ArrayList<>();
+		int itemIndex = 0;
 		for (Map<String, Object> it : items) {
-			UUID variantId = UUID.fromString(String.valueOf(it.get("variantId")));
-			BigDecimal qty = new Quantity(new BigDecimal(String.valueOf(it.getOrDefault("qty", "1")))).value();
+			UUID variantId = requiredUuid(it.get("variantId"), "items[" + itemIndex + "].variantId");
+			Object quantityValue = it.containsKey("quantity") ? it.get("quantity") : it.get("qty");
+			BigDecimal qty = requiredQuantity(quantityValue, "items[" + itemIndex + "].quantity");
 			VariantEntity v = catalog.requireVariant(variantId);
 			ItemEntity item = catalog.requireItem(v.getItemId());
+			if (it.get("menuItemId") != null) {
+				UUID menuItemId = requiredUuid(it.get("menuItemId"), "items[" + itemIndex + "].menuItemId");
+				if (!menuItemId.equals(item.getId()))
+					throw ApiException.bad("INVALID_VARIANT", "The selected variant does not belong to the specified menu item");
+			}
+			if (!outletId.equals(item.getOutletId()))
+				throw ApiException.bad("ITEM_OUTLET", "The selected menu item does not belong to this outlet");
+			if (item.isDeleted()) throw ApiException.notFound("ITEM", "Menu item not found");
 			if (item.isEightySixed()) throw ApiException.conflict("86", "Item not available");
+			if (!"QR_DINE_IN".equals(channel) && !item.isAvailableOnCounter())
+				throw ApiException.conflict("ITEM_UNAVAILABLE", "The selected menu item is currently unavailable");
 			if ("QR_DINE_IN".equals(channel) && !item.isAvailableOnQr()) {
 				throw ApiException.conflict("NOT_ON_QR", "Item hidden from QR");
 			}
@@ -263,6 +314,11 @@ public class OrderService {
 			line.setUnitPaise(v.getPricePaise());
 			UUID recipe = inventory.latestRecipe(variantId);
 			line.setRecipeVersionId(recipe);
+			if (it.get("notes") != null) {
+				String note = String.valueOf(it.get("notes")).trim();
+				if (note.length() > 200) throw ApiException.bad("VALIDATION", "Item notes must be 200 characters or fewer");
+				line.setNotes(note.isEmpty() ? null : note);
+			}
 			if (it.get("modifierIds") instanceof List<?> mods) {
 				for (Object mid : mods) {
 					var m = catalog.modifier(UUID.fromString(String.valueOf(mid)));
@@ -286,6 +342,7 @@ public class OrderService {
 				}
 			}
 			if (recipe != null) recipeIds.add(recipe);
+			itemIndex++;
 		}
 		o.setSubtotalPaise(o.getSubtotalPaise() + added);
 		if (o.getSubtotalPaise() > outlet.getMaxOpenAmountPaise()) {
@@ -296,6 +353,28 @@ public class OrderService {
 			confirmRound(o, round, outlet);
 		}
 		return toView(o);
+	}
+
+	private static UUID requiredUuid(Object value, String field) {
+		if (value == null || String.valueOf(value).isBlank())
+			throw ApiException.bad("VALIDATION", field + " is required");
+		try {
+			return UUID.fromString(String.valueOf(value));
+		} catch (IllegalArgumentException ex) {
+			throw ApiException.bad("INVALID_ID", field + " must be a valid UUID");
+		}
+	}
+
+	private static BigDecimal requiredQuantity(Object value, String field) {
+		if (value == null) throw ApiException.bad("VALIDATION", field + " is required");
+		try {
+			BigDecimal quantity = new Quantity(new BigDecimal(String.valueOf(value))).value();
+			if (quantity.compareTo(BigDecimal.ZERO) <= 0 || quantity.compareTo(new BigDecimal("99")) > 0)
+				throw ApiException.bad("INVALID_QUANTITY", field + " must be greater than 0 and no more than 99");
+			return quantity;
+		} catch (NumberFormatException ex) {
+			throw ApiException.bad("INVALID_QUANTITY", field + " must be a valid number");
+		}
 	}
 
 	private void confirmRound(OrderEntity o, OrderRoundEntity round, OutletEntity outlet) {
@@ -337,6 +416,7 @@ public class OrderService {
 		o.setTotalPaise(inv.getTotalPaise());
 		o.setTaxPaise(inv.getTaxPaise());
 		orders.save(o);
+		if(o.getTableId()!=null)floor.markPaymentPending(o.getTableId());
 		Map<String, Object> view = new LinkedHashMap<>(toView(o));
 		view.put("invoiceId", inv.getId());
 		view.put("invoiceTotalPaise", inv.getTotalPaise());
@@ -356,6 +436,13 @@ public class OrderService {
 			throw ApiException.forbidden("WRONG_TABLE", "Not your table");
 		}
 		return o;
+	}
+
+	private static void requireAssignedWaiterOrManager(OrderEntity order, TenantPrincipal principal) {
+		if (principal.hasRole("WAITER") && order.getAssignedWaiterId() != null && !order.getAssignedWaiterId().equals(principal.userId())
+				&& !(principal.hasRole("OWNER") || principal.hasRole("MANAGER") || principal.hasRole("SHIFT_MANAGER"))) {
+			throw ApiException.forbidden("WAITER_ASSIGNMENT", "This table is assigned to another waiter");
+		}
 	}
 
 	private Map<String, Object> toView(OrderEntity o) {

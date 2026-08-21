@@ -31,6 +31,9 @@ public class FloorController {
 	@GetMapping("/outlets/{outletId}/tables")
 	public java.util.List<Map<String, Object>> tables(@PathVariable UUID outletId) { return floor.listFloor(outletId); }
 
+	@GetMapping("/outlets/{outletId}/floor-layout")
+	public Map<String, Object> layout(@PathVariable UUID outletId) { return floor.floorLayout(outletId); }
+
 	@GetMapping("/outlets/{outletId}/areas")
 	public java.util.List<Map<String, Object>> areas(@PathVariable UUID outletId) {
 		return floor.listAreas(outletId).stream().map(area -> Map.<String, Object>of("id", area.getId(), "name", area.getName(), "outletId", area.getOutletId())).toList();
@@ -41,7 +44,7 @@ public class FloorController {
 			@RequestBody Map<String, Object> body) {
 		if (!(body.get("seats") instanceof Number seats)) throw com.restaurant.platform.api.ApiException.bad("VALIDATION", "Seats must be a number");
 		return floor.updateTable(tableId, body.get("code") == null ? null : body.get("code").toString(), seats.intValue(),
-				body.get("status") == null ? "FREE" : body.get("status").toString(), version);
+				body.get("status") == null ? null : body.get("status").toString(), version);
 	}
 
 	@DeleteMapping("/tables/{tableId}")
@@ -65,6 +68,12 @@ public class FloorController {
 		floor.clearTable(tableId);
 		return ResponseEntity.noContent().build();
 	}
+
+	@PostMapping("/tables/{tableId}/start-cleaning")
+	public ResponseEntity<Void> startCleaning(@PathVariable UUID tableId) { floor.startCleaning(tableId); return ResponseEntity.noContent().build(); }
+
+	@PostMapping("/tables/{tableId}/complete-cleaning")
+	public ResponseEntity<Void> completeCleaning(@PathVariable UUID tableId) { floor.completeCleaning(tableId); return ResponseEntity.noContent().build(); }
 
 	@GetMapping("/public/qr/{token}")
 	public Map<String, Object> info(@PathVariable String token) {

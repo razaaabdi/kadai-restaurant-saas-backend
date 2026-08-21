@@ -46,8 +46,18 @@ class FloorMenuManagementIT extends AbstractIT {
         assertThat(api.postRaw("/api/v1/areas/" + areaId + "/tables", "{\"code\":\" t1 \",\"seats\":4}", null).getStatusCode().value()).isEqualTo(409);
         assertThat(api.postRaw("/api/v1/areas/" + areaId + "/tables", "{\"code\":\"T2\",\"seats\":0}", null).getStatusCode().value()).isEqualTo(400);
 
+        var invalidVariant = api.postRaw("/api/v1/outlets/" + outletId + "/orders",
+                "{\"channel\":\"COUNTER_DINE_IN\",\"tableId\":\"" + tableId + "\",\"items\":[{\"variantId\":\"variant-1\",\"quantity\":1}]}", UUID.randomUUID().toString());
+        assertThat(invalidVariant.getStatusCode().value()).isEqualTo(400);
+        assertThat(invalidVariant.getBody()).contains("INVALID_ID", "items[0].variantId");
+
+        var invalidQuantity = api.postRaw("/api/v1/outlets/" + outletId + "/orders",
+                "{\"channel\":\"COUNTER_DINE_IN\",\"tableId\":\"" + tableId + "\",\"items\":[{\"variantId\":\"" + variantId + "\",\"quantity\":0}]}", UUID.randomUUID().toString());
+        assertThat(invalidQuantity.getStatusCode().value()).isEqualTo(400);
+        assertThat(invalidQuantity.getBody()).contains("INVALID_QUANTITY", "items[0].quantity");
+
         Map<String, Object> order = api.post("/api/v1/outlets/" + outletId + "/orders",
-                "{\"channel\":\"COUNTER_DINE_IN\",\"tableId\":\"" + tableId + "\",\"items\":[{\"variantId\":\"" + variantId + "\",\"qty\":\"1\"}]}", "create-order");
+                "{\"channel\":\"COUNTER_DINE_IN\",\"tableId\":\"" + tableId + "\",\"items\":[{\"menuItemId\":\"" + itemId + "\",\"variantId\":\"" + variantId + "\",\"quantity\":1}]}", "create-order");
         String orderId = Http.uuid(order, "id");
         Map<String, Object> active = api.get("/api/v1/outlets/" + outletId + "/tables/" + tableId + "/active-order");
         assertThat(Http.uuid(active, "id")).isEqualTo(orderId);
