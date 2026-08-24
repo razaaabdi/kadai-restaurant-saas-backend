@@ -15,8 +15,8 @@ public class InventoryController {
 	}
 
 	@PostMapping("/outlets/{outletId}/inventory-items")
-	public Map<String, Object> item(@PathVariable UUID outletId, @RequestBody Map<String, String> body) {
-		return inventory.createItem(outletId, body.get("name"), body.getOrDefault("unit", "g"));
+	public Map<String, Object> item(@PathVariable UUID outletId, @RequestBody Map<String, Object> body) {
+		return inventory.createItem(outletId, str(body.get("name")), str(body.get("unit")), str(body.get("qty")));
 	}
 
 	@PostMapping("/recipes")
@@ -34,5 +34,9 @@ public class InventoryController {
 	@GetMapping("/stock/balance")
 	public Map<String, Object> bal(@RequestParam UUID outletId, @RequestParam UUID inventoryItemId) {
 		return Map.of("qty", inventory.balance(outletId, inventoryItemId));
+	}
+
+	private static String str(Object value) {
+		return value == null ? null : String.valueOf(value);
 	}
 }

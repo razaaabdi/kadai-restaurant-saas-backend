@@ -10,7 +10,7 @@ import client  # noqa: E402
 
 st.set_page_config(page_title="Inventory", layout="wide")
 st.title("Inventory")
-st.caption("No local qty. Purchase is the only stock POST. Ledger/adjustment have no HTTP routes.")
+st.caption("Create item with name, unit, and opening qty. Extra stock still uses purchase. Ledger/adjustment have no HTTP routes.")
 
 if "inv_created_items" not in st.session_state:
 	st.session_state["inv_created_items"] = []
@@ -37,15 +37,17 @@ def remember_item(body):
 	rows = st.session_state["inv_created_items"]
 	if any(r.get("id") == body["id"] for r in rows):
 		return
-	rows.append({"id": body["id"], "name": body.get("name")})
+	rows.append({"id": body["id"], "name": body.get("name"), "unit": body.get("unit"), "qty": body.get("qty")})
 
 
 st.subheader("POST /api/v1/outlets/{outletId}/inventory-items")
 with st.form("inv_create_item"):
 	name = st.text_input("name")
 	unit = st.text_input("unit", value="g")
+	qty = st.text_input("qty", value="0")
 	if st.form_submit_button("create item") and outlet_id:
-		r = client.request("POST", f"/api/v1/outlets/{outlet_id}/inventory-items", json={"name": name, "unit": unit or "g"})
+		payload = {"name": name, "unit": unit or "g", "qty": qty or "0"}
+		r = client.request("POST", f"/api/v1/outlets/{outlet_id}/inventory-items", json=payload)
 		show(r)
 		if r.is_success:
 			try:

@@ -39,14 +39,22 @@ public class InventoryFacade {
 	}
 
 	@Transactional
-	public Map<String, Object> createItem(UUID outletId, String name, String unit) {
+	public Map<String, Object> createItem(UUID outletId, String name, String unit, String qtyRaw) {
+		if (name == null || name.isBlank()) {
+			throw ApiException.bad("ITEM_NAME", "Name is required");
+		}
+		String uom = (unit == null || unit.isBlank()) ? "g" : unit.trim();
+		BigDecimal opening = openingQty(qtyRaw);
 		InventoryItemEntity e = new InventoryItemEntity();
 		e.setTenantId(TenantContext.require().tenantId());
 		e.setOutletId(outletId);
-		e.setName(name);
-		e.setUnit(unit);
+		e.setName(name.trim());
+		e.setUnit(uom);
 		items.save(e);
-		return Map.of("id", e.getId(), "name", name);
+		if (opening.compareTo(BigDecimal.ZERO) > 0) {
+			apply(outletId, e.getId(), "PURCHASE", opening, null, true);
+		}
+		return Map.of("id", e.getId(), "name", name.trim(), "unit", uom, "qty", opening);
 	}
 
 	@Transactional
@@ -100,6 +108,21 @@ public class InventoryFacade {
 	public BigDecimal balance(UUID outletId, UUID inventoryItemId) {
 		return balances.findByOutletIdAndInventoryItemId(outletId, inventoryItemId)
 				.map(StockBalanceEntity::getQty).orElse(BigDecimal.ZERO);
+	}
+
+	private static BigDecimal openingQty(String qtyRaw) {
+		if (qtyRaw == null || qtyRaw.isBlank() || "null".equalsIgnoreCase(qtyRaw)) {
+			return BigDecimal.ZERO.setScale(4);
+		}
+		try {
+			BigDecimal qty = new Quantity(new BigDecimal(qtyRaw.trim())).value();
+			if (qty.compareTo(BigDecimal.ZERO) < 0) {
+				throw ApiException.bad("ITEM_QTY", "Qty cannot be negative");
+			}
+			return qty;
+		} catch (NumberFormatException ex) {
+			throw ApiException.bad("ITEM_QTY", "Qty must be a number");
+		}
 	}
 
 	private void apply(UUID outletId, UUID inventoryItemId, String type, BigDecimal qty, UUID orderId, boolean allowNegative) {
