@@ -19,6 +19,11 @@ public class InventoryController {
 		return inventory.createItem(outletId, str(body.get("name")), str(body.get("unit")), str(body.get("qty")));
 	}
 
+	@PutMapping("/inventory-items/{itemId}")
+	public Map<String, Object> update(@PathVariable UUID itemId, @RequestBody Map<String, Object> body) {
+		return inventory.updateItem(itemId, str(body.get("name")), str(body.get("unit")));
+	}
+
 	@PostMapping("/recipes")
 	public Map<String, Object> recipe(@RequestBody Map<String, String> body) {
 		return inventory.createRecipe(UUID.fromString(body.get("variantId")), UUID.fromString(body.get("inventoryItemId")),

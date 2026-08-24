@@ -58,6 +58,33 @@ public class InventoryFacade {
 	}
 
 	@Transactional
+	public Map<String, Object> updateItem(UUID itemId, String name, String unit) {
+		if (name == null || name.isBlank()) {
+			throw ApiException.bad("ITEM_NAME", "Name is required");
+		}
+		InventoryItemEntity e = items.findById(itemId)
+				.orElseThrow(() -> ApiException.notFound("ITEM", "Inventory item not found"));
+		var p = TenantContext.require();
+		if (p.isGuest()) {
+			throw ApiException.forbidden("STAFF_ONLY", "Guests cannot manage inventory");
+		}
+		if (!p.tenantId().equals(e.getTenantId())) {
+			throw ApiException.notFound("ITEM", "Inventory item not found");
+		}
+		if (p.outletIds() == null || !p.outletIds().contains(e.getOutletId())) {
+			throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet");
+		}
+		String uom = (unit == null || unit.isBlank() || "null".equalsIgnoreCase(unit)) ? e.getUnit() : unit.trim();
+		if (uom == null || uom.isBlank()) {
+			uom = "g";
+		}
+		e.setName(name.trim());
+		e.setUnit(uom);
+		items.save(e);
+		return Map.of("id", e.getId(), "name", e.getName(), "unit", e.getUnit(), "qty", balance(e.getOutletId(), e.getId()));
+	}
+
+	@Transactional
 	public Map<String, Object> createRecipe(UUID variantId, UUID inventoryItemId, String qty) {
 		RecipeVersionEntity v = new RecipeVersionEntity();
 		v.setTenantId(TenantContext.require().tenantId());
