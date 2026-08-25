@@ -1,0 +1,5 @@
+package com.restaurant.inventory.domain;
+
+public enum WastageReason {
+	EXPIRED, SPOILED, PREPARATION_LOSS, OVERCOOKED, DROPPED, WRONG_ORDER, CUSTOMER_RETURN, QUALITY_REJECTION, OTHER
+}
