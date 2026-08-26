@@ -34,6 +34,7 @@ public class GlobalExceptionHandler {
 	private ResponseEntity<Map<String, String>> body(HttpStatus status, String code, String message, HttpServletRequest req) {
 		String rid = (String) req.getAttribute("requestId");
 		if (rid == null) rid = UUID.randomUUID().toString();
-		return ResponseEntity.status(status).body(Map.of("code", code, "message", message, "requestId", rid));
+		return ResponseEntity.status(status).body(Map.of("code", code, "message", message, "requestId", rid,
+				"correlationId", rid));
 	}
 }

@@ -41,6 +41,16 @@ class RestaurantSpineIT extends AbstractIT {
 				{"name":"Batter","unit":"g"}
 				""");
 		String invId = Http.uuid(invItem, "id");
+		var invUpdated = api.putRaw("/api/v1/inventory-items/" + invId, """
+				{"name":"Dosa Batter","unit":"kg"}
+				""", 0);
+		assertThat(invUpdated.getStatusCode().is2xxSuccessful()).isTrue();
+		var invBody = Http.parse(invUpdated.getBody());
+		assertThat(invBody.get("name")).isEqualTo("Dosa Batter");
+		assertThat(invBody.get("unit")).isEqualTo("kg");
+		assertThat(api.putRaw("/api/v1/inventory-items/" + UUID.randomUUID(), """
+				{"name":"Missing","unit":"g"}
+				""", 0).getStatusCode().value()).isEqualTo(404);
 		api.post("/api/v1/recipes",
 				"{\"variantId\":\"" + variantId + "\",\"inventoryItemId\":\"" + invId + "\",\"qty\":\"100.0000\"}",
 				UUID.randomUUID().toString());
