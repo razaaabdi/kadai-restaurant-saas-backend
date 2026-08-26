@@ -5,8 +5,12 @@ import com.restaurant.catalog.application.CatalogService;
 import com.restaurant.catalog.infrastructure.ItemEntity;
 import com.restaurant.catalog.infrastructure.TaxCodeEntity;
 import com.restaurant.catalog.infrastructure.VariantEntity;
+import com.restaurant.configuration.application.OrderConfigurationService;
+import com.restaurant.configuration.application.OrderSettings;
 import com.restaurant.inventory.api.InventoryFacade;
+import com.restaurant.order.domain.OrderEntryMode;
 import com.restaurant.order.domain.OrderStatus;
+import com.restaurant.order.domain.OrderType;
 import com.restaurant.order.infrastructure.OrderEntity;
 import com.restaurant.order.infrastructure.OrderLineEntity;
 import com.restaurant.order.infrastructure.OrderLineModifierEntity;
@@ -34,10 +38,14 @@ import com.restaurant.platform.api.TenantContext;
 import com.restaurant.platform.api.TenantPrincipal;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,10 +67,14 @@ public class OrderService {
 	private final KotRepository kots;
 	private final AuditWriter audit;
 	private final OutboxPublisher outbox;
+	private final OrderConfigurationService configuration;
+	private final JdbcTemplate jdbc;
 
 	public OrderService(OrderRepository orders, OrderRoundRepository rounds, OrderLineRepository lines,
 			OrderLineModifierRepository lineMods, CatalogService catalog, InventoryFacade inventory,
-			FloorService floor, BillingFacade billing, ApplicationEventPublisher events,PaymentRepository payments,KotRepository kots,AuditWriter audit,OutboxPublisher outbox) {
+			FloorService floor, BillingFacade billing, ApplicationEventPublisher events,PaymentRepository payments,
+			KotRepository kots,AuditWriter audit,OutboxPublisher outbox,
+			OrderConfigurationService configuration, JdbcTemplate jdbc) {
 		this.orders = orders;
 		this.rounds = rounds;
 		this.lines = lines;
@@ -73,6 +85,8 @@ public class OrderService {
 		this.billing = billing;
 		this.events = events;
 		this.payments=payments;this.kots=kots;this.audit=audit;this.outbox=outbox;
+		this.configuration = configuration;
+		this.jdbc = jdbc;
 	}
 
 	@Transactional
@@ -85,7 +99,7 @@ public class OrderService {
 			throw ApiException.forbidden("WRONG_TABLE", "Token is not this table");
 		}
 		if (q.qrLocked()) throw ApiException.gone("QR_LOCKED", "QR locked");
-		return addRoundInternal(q.outletId(), q.tableId(), "QR_DINE_IN", items, true);
+		return addRoundInternal(null, q.outletId(), q.tableId(), "QR_DINE_IN", items, true);
 	}
 
 	@Transactional
@@ -93,7 +107,80 @@ public class OrderService {
 		TenantPrincipal p = TenantContext.require();
 		if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Staff counter path");
 		if (channel == null) channel = tableId == null ? "TAKEAWAY" : "COUNTER_DINE_IN";
-		return addRoundInternal(outletId, tableId, channel, items, true);
+		return addRoundInternal(null, outletId, tableId, channel, items, true);
+	}
+
+	@Transactional
+	public Map<String, Object> startDineIn(UUID outletId, UUID tableId, String requestedMode) {
+		TenantPrincipal p = requireStaffWithOutlet(outletId);
+		OrderSettings settings = configuration.settings(outletId);
+		if (!settings.dineInEnabled()) throw ApiException.conflict("DINE_IN_DISABLED", "Dine-in ordering is disabled for this outlet");
+		var table = floor.lockForOrder(tableId);
+		if (!outletId.equals(table.getOutletId())) throw ApiException.bad("TABLE_OUTLET", "Table does not belong to this outlet");
+		OrderEntity active = openForTable(outletId, tableId);
+		if (active != null) return toView(active);
+		if (!"FREE".equals(table.getStatus())) throw ApiException.conflict("TABLE_UNAVAILABLE", "This table is not available for a new order");
+		String configuredMode = requestedMode == null || requestedMode.isBlank() ? settings.defaultDineInEntryMode() : requestedMode;
+		if ("ASK_EVERY_TIME".equals(configuredMode)) {
+			throw ApiException.bad("ORDER_ENTRY_MODE_REQUIRED", "Choose direct POS or waiter paper/counter entry");
+		}
+		OrderEntryMode mode = OrderEntryMode.parse(configuredMode);
+		OrderEntity order = newOrder(p, outletId, tableId, "COUNTER_DINE_IN", OrderType.DINE_IN, mode);
+		try {
+			orders.saveAndFlush(order);
+		} catch (DataIntegrityViolationException ex) {
+			OrderEntity concurrent = openForTable(outletId, tableId);
+			if (concurrent != null) return toView(concurrent);
+			throw ex;
+		}
+		floor.occupy(tableId);
+		if (p.userId() != null) events.publishEvent(new com.restaurant.platform.api.DineInOrderOpened(
+				p.tenantId(), outletId, tableId, order.getId(), p.userId()));
+		audit.write("DINE_IN_ORDER_STARTED", "ORDER", order.getId(), "table=" + tableId + " mode=" + mode);
+		return toView(order);
+	}
+
+	@Transactional
+	public Map<String, Object> startDineIn(UUID tableId, String requestedMode) {
+		var table = floor.lockForOrder(tableId);
+		return startDineIn(table.getOutletId(), tableId, requestedMode);
+	}
+
+	@Transactional
+	public Map<String, Object> startTakeaway(UUID outletId, String customerName, String customerPhone) {
+		TenantPrincipal p = requireStaffWithOutlet(outletId);
+		OrderSettings settings = configuration.settings(outletId);
+		if (!settings.takeawayEnabled() || !floor.outlet(outletId).isTakeawayEnabled())
+			throw ApiException.conflict("TAKEAWAY_DISABLED", "Takeaway ordering is disabled for this outlet");
+		OrderEntity order = newOrder(p, outletId, null, "TAKEAWAY", OrderType.TAKEAWAY, OrderEntryMode.DIRECT_POS);
+		order.setCustomerName(optionalText(customerName, "Customer name", 100));
+		order.setCustomerPhone(optionalPhone(customerPhone));
+		order.setTokenNumber(nextTakeawayToken(p.tenantId(), outletId, order.getBusinessDate()));
+		orders.save(order);
+		audit.write("TAKEAWAY_ORDER_STARTED", "ORDER", order.getId(), "token=" + order.getTokenNumber());
+		return toView(order);
+	}
+
+	@Transactional
+	public Map<String, Object> startTakeaway(String customerName, String customerPhone) {
+		TenantPrincipal principal = TenantContext.require();
+		UUID outletId = principal.outletId();
+		if (outletId == null && principal.outletIds() != null && principal.outletIds().size() == 1) {
+			outletId = principal.outletIds().getFirst();
+		}
+		if (outletId == null) throw ApiException.bad("OUTLET_REQUIRED", "Select an outlet before starting a takeaway order");
+		return startTakeaway(outletId, customerName, customerPhone);
+	}
+
+	@Transactional(readOnly = true)
+	public List<Map<String, Object>> activeTakeaway(UUID outletId) {
+		requireStaffWithOutlet(outletId);
+		List<String> terminal = List.of(OrderStatus.COMPLETED, OrderStatus.CANCELLED, OrderStatus.VOIDED);
+		List<OrderEntity> result = new ArrayList<>(orders.findByOutletIdAndOrderTypeAndStatusNotInOrderByCreatedAtDesc(
+				outletId, OrderType.TAKEAWAY.name(), terminal));
+		orders.findByOutletIdAndOrderTypeIsNullAndStatusNotInOrderByCreatedAtDesc(outletId, terminal).stream()
+				.filter(order -> derivedType(order) == OrderType.TAKEAWAY).forEach(result::add);
+		return result.stream().sorted((a, b) -> b.getCreatedAt().compareTo(a.getCreatedAt())).map(this::toView).toList();
 	}
 
 	@Transactional
@@ -102,7 +189,11 @@ public class OrderService {
 		OrderEntity order = requireOwn(orderId);
 		requireAssignedWaiterOrManager(order, p);
 		if (!OrderStatus.open(order.getStatus())) throw ApiException.conflict("ORDER_CLOSED", "This order is already closed");
-		return addRoundInternal(order.getOutletId(), order.getTableId(), order.getChannel(), items, true);
+		if (rounds.findByOrderIdOrderByRoundNo(order.getId()).size() > 0
+				&& !configuration.settings(order.getOutletId()).allowAdditionalKot()) {
+			throw ApiException.conflict("ADDITIONAL_KOT_DISABLED", "Additional order rounds are disabled for this outlet");
+		}
+		return addRoundInternal(order, order.getOutletId(), order.getTableId(), order.getChannel(), items, true);
 	}
 
 	public Map<String, Object> activeForTable(UUID outletId, UUID tableId) {
@@ -219,7 +310,9 @@ public class OrderService {
 		}
 		// A fully paid dine-in order no longer needs a second manual close action.
 		// Only release it to cleaning after every kitchen/service task is terminal.
-		if (OrderStatus.PAID.equals(o.getStatus()) && serviceIsComplete(o.getId())) {
+		boolean autoComplete = configuration.settings(o.getOutletId()).autoCompleteAfterFullPayment();
+		if (OrderStatus.PAID.equals(o.getStatus()) && autoComplete
+				&& (derivedType(o) == OrderType.TAKEAWAY || serviceIsComplete(o.getId()))) {
 			completePaidOrder(o);
 		}
 	}
@@ -244,7 +337,7 @@ public class OrderService {
 		OrderStatus.assertTransition(o.getStatus(),OrderStatus.COMPLETED);o.setStatus(OrderStatus.COMPLETED);orders.save(o);if(o.getTableId()!=null)floor.markPaidDirty(o.getTableId());audit.write("ORDER_CLOSED","ORDER",o.getId(),"table="+o.getTableId());outbox.publish(o.getTenantId(),"OrderClosed","{\"orderId\":\""+o.getId()+"\",\"outletId\":\""+o.getOutletId()+"\",\"tableId\":\""+o.getTableId()+"\"}");events.publishEvent(new OrderClosed(o.getTenantId(),o.getOutletId(),o.getId(),o.getTableId()));
 	}
 
-	private Map<String, Object> addRoundInternal(UUID outletId, UUID tableId, String channel, List<Map<String, Object>> items,
+	private Map<String, Object> addRoundInternal(OrderEntity suppliedOrder, UUID outletId, UUID tableId, String channel, List<Map<String, Object>> items,
 			boolean autoConfirm) {
 		TenantPrincipal p = TenantContext.require();
 		if (items == null || items.isEmpty()) throw ApiException.bad("EMPTY_ORDER", "Add at least one item");
@@ -252,18 +345,13 @@ public class OrderService {
 		var table = tableId == null ? null : floor.lockForOrder(tableId);
 		if (table != null && !outletId.equals(table.getOutletId()))
 			throw ApiException.bad("TABLE_OUTLET", "Table does not belong to this outlet");
-		OrderEntity o = tableId == null ? null : openForTable(outletId, tableId);
+		OrderEntity o = suppliedOrder != null ? suppliedOrder : tableId == null ? null : openForTable(outletId, tableId);
 		boolean created = false;
 		if (o == null) {
 			if (table != null && !"FREE".equals(table.getStatus()))
 				throw ApiException.conflict("TABLE_UNAVAILABLE", "This table is not available for a new order");
-			o = new OrderEntity();
-			o.setTenantId(p.tenantId());
-			o.setOutletId(outletId);
-			o.setTableId(tableId);
-			o.setChannel(channel);
-			o.setStatus(OrderStatus.DRAFT);
-			o.setAssignedWaiterId(p.userId());
+			o = newOrder(p, outletId, tableId, channel,
+					tableId == null ? OrderType.TAKEAWAY : OrderType.DINE_IN, OrderEntryMode.DIRECT_POS);
 			orders.save(o);
 			if (tableId != null && p.userId() != null) {
 				events.publishEvent(new com.restaurant.platform.api.DineInOrderOpened(p.tenantId(), outletId, tableId, o.getId(), p.userId()));
@@ -382,7 +470,8 @@ public class OrderService {
 			OrderStatus.assertTransition(o.getStatus(), OrderStatus.CONFIRMED);
 			o.setStatus(OrderStatus.CONFIRMED);
 		}
-		boolean allowNeg = outlet.isAllowNegativeStock();
+		String stockPolicy = configuration.settings(o.getOutletId()).negativeStockPolicy();
+		boolean allowNeg = outlet.isAllowNegativeStock() && !"BLOCK".equals(stockPolicy);
 		for (OrderLineEntity line : lines.findByOrderId(o.getId())) {
 			if (!line.getRoundId().equals(round.getId())) continue;
 			inventory.deductSale(o.getOutletId(), o.getId(), line.getRecipeVersionId(), line.getQty(), allowNeg);
@@ -438,6 +527,72 @@ public class OrderService {
 		return o;
 	}
 
+	private TenantPrincipal requireStaffWithOutlet(UUID outletId) {
+		TenantPrincipal p = TenantContext.require();
+		if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Staff access required");
+		OutletEntity outlet = floor.outlet(outletId);
+		if (!outlet.getTenantId().equals(p.tenantId())) throw ApiException.notFound("OUTLET", "Outlet not found");
+		if (p.outletIds() != null && !p.outletIds().isEmpty() && !p.outletIds().contains(outletId))
+			throw ApiException.forbidden("OUTLET_SCOPE", "Outlet is outside your assigned scope");
+		return p;
+	}
+
+	private OrderEntity newOrder(TenantPrincipal p, UUID outletId, UUID tableId, String channel,
+			OrderType type, OrderEntryMode mode) {
+		OrderEntity order = new OrderEntity();
+		order.setTenantId(p.tenantId());
+		order.setOutletId(outletId);
+		order.setTableId(tableId);
+		order.setChannel(channel);
+		order.setStatus(OrderStatus.DRAFT);
+		order.setAssignedWaiterId(p.userId());
+		order.setCreatedBy(p.userId());
+		order.setOrderType(type.name());
+		order.setOrderEntryMode(mode.name());
+		order.setOrderNumber("ORD-" + order.getId().toString().replace("-", "").toUpperCase());
+		order.setBusinessDate(businessDate(outletId));
+		return order;
+	}
+
+	private LocalDate businessDate(UUID outletId) {
+		String timezone = floor.outlet(outletId).getTimezone();
+		try {
+			return LocalDate.now(ZoneId.of(timezone == null || timezone.isBlank() ? "UTC" : timezone));
+		} catch (RuntimeException ex) {
+			return LocalDate.now(ZoneId.of("UTC"));
+		}
+	}
+
+	private String nextTakeawayToken(UUID tenantId, UUID outletId, LocalDate businessDate) {
+		Integer number = jdbc.queryForObject("""
+				INSERT INTO takeaway_token_seq (tenant_id, outlet_id, business_date, last_number)
+				VALUES (?, ?, ?, 1)
+				ON CONFLICT (tenant_id, outlet_id, business_date)
+				DO UPDATE SET last_number = takeaway_token_seq.last_number + 1
+				RETURNING last_number
+				""", Integer.class, tenantId, outletId, businessDate);
+		return "A-" + number;
+	}
+
+	private static String optionalText(String value, String field, int maxLength) {
+		if (value == null || value.isBlank()) return null;
+		String clean = value.strip().replaceAll("\\s+", " ");
+		if (clean.length() > maxLength) throw ApiException.bad("VALIDATION", field + " must be " + maxLength + " characters or fewer");
+		return clean;
+	}
+
+	private static String optionalPhone(String value) {
+		String clean = optionalText(value, "Customer phone", 24);
+		if (clean != null && !clean.matches("[+0-9 ()-]{6,24}"))
+			throw ApiException.bad("VALIDATION", "Customer phone contains unsupported characters");
+		return clean;
+	}
+
+	private static OrderType derivedType(OrderEntity order) {
+		if (order.getOrderType() != null) return OrderType.parse(order.getOrderType());
+		return order.getTableId() == null || "TAKEAWAY".equals(order.getChannel()) ? OrderType.TAKEAWAY : OrderType.DINE_IN;
+	}
+
 	private static void requireAssignedWaiterOrManager(OrderEntity order, TenantPrincipal principal) {
 		if (principal.hasRole("WAITER") && order.getAssignedWaiterId() != null && !order.getAssignedWaiterId().equals(principal.userId())
 				&& !(principal.hasRole("OWNER") || principal.hasRole("MANAGER") || principal.hasRole("SHIFT_MANAGER"))) {
@@ -456,6 +611,20 @@ public class OrderService {
 		m.put("totalPaise", o.getTotalPaise());
 		m.put("guestFrozen", o.isGuestFrozen());
 		m.put("rounds", rounds.findByOrderIdOrderByRoundNo(o.getId()).size());
+		m.put("orderNumber", o.getOrderNumber() == null ? "ORD-" + o.getId().toString().replace("-", "").toUpperCase() : o.getOrderNumber());
+		m.put("orderType", derivedType(o).name());
+		m.put("orderEntryMode", o.getOrderEntryMode() == null ? OrderEntryMode.DIRECT_POS.name() : o.getOrderEntryMode());
+		m.put("tokenNumber", o.getTokenNumber());
+		m.put("customerName", o.getCustomerName());
+		m.put("customerPhone", o.getCustomerPhone());
+		m.put("businessDate", o.getBusinessDate());
+		m.put("createdBy", o.getCreatedBy());
+		m.put("createdAt", o.getCreatedAt());
+		m.put("version", o.getVersion());
+		billing.findByOrder(o.getId()).ifPresent(invoice -> {
+			m.put("invoiceId", invoice.getId());
+			m.put("invoiceTotalPaise", invoice.getTotalPaise());
+		});
 		return m;
 	}
 }

@@ -13,6 +13,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -83,6 +84,10 @@ public class BillingFacade {
 
 	public InvoiceEntity byOrder(UUID orderId) {
 		return invoices.findByOrderId(orderId).orElseThrow(() -> ApiException.notFound("INVOICE", "No invoice"));
+	}
+
+	public Optional<InvoiceEntity> findByOrder(UUID orderId) {
+		return invoices.findByOrderId(orderId);
 	}
 
 	public InvoiceEntity require(UUID id) {

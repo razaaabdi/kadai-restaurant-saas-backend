@@ -1,0 +1,10 @@
+#!/bin/sh
+
+test x$SKIP_BACKEND_DEVELOPER_DOC_CHECK = x1 && exit 0
+
+git diff --cached --name-only --diff-filter=ACMR | grep -Eq '^(src/|streamlit_app/|scripts/|gradle/|\.githooks/|build\.gradle$|settings\.gradle$|gradlew|Dockerfile|docker-compose)' || exit 0
+git diff --cached --name-only --diff-filter=ACMR | grep -Fxq BACKEND_DEVELOPER_WORKFLOW.md && exit 0
+
+echo 'Code changes require an updated and staged BACKEND_DEVELOPER_WORKFLOW.md.' >&2
+echo 'Bypass once with SKIP_BACKEND_DEVELOPER_DOC_CHECK=1.' >&2
+exit 1

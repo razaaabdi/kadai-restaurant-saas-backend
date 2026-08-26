@@ -13,6 +13,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -21,12 +23,15 @@ public class OrderController {
 	private final FloorService floor;
 	private final CatalogService catalog;
 	private final IdempotencyService idempotency;
+	private final JsonMapper jsonMapper;
 
-	public OrderController(OrderService orders, FloorService floor, CatalogService catalog, IdempotencyService idempotency) {
+	public OrderController(OrderService orders, FloorService floor, CatalogService catalog, IdempotencyService idempotency,
+			JsonMapper jsonMapper) {
 		this.orders = orders;
 		this.floor = floor;
 		this.catalog = catalog;
 		this.idempotency = idempotency;
+		this.jsonMapper = jsonMapper;
 	}
 
 	@GetMapping("/public/qr/{token}/menu")
@@ -80,6 +85,46 @@ public class OrderController {
 		});
 	}
 
+	@PostMapping("/outlets/{outletId}/tables/{tableId}/orders")
+	public ResponseEntity<String> startDineIn(@PathVariable UUID outletId, @PathVariable UUID tableId,
+			@RequestHeader("Idempotency-Key") String key, @RequestBody(required = false) String raw) {
+		String request = raw == null ? "" : raw;
+		return idempotency.run(TenantContext.require().tenantId(), key, request, () -> {
+			Map<String, Object> body = request.isBlank() ? Map.of() : read(request);
+			String mode = body.get("orderEntryMode") == null ? null : String.valueOf(body.get("orderEntryMode"));
+			return json(orders.startDineIn(outletId, tableId, mode));
+		});
+	}
+
+	@PostMapping("/tables/{tableId}/orders")
+	public ResponseEntity<String> startDineIn(@PathVariable UUID tableId,
+			@RequestHeader("Idempotency-Key") String key, @RequestBody(required = false) String raw) {
+		String request = raw == null ? "" : raw;
+		return idempotency.run(TenantContext.require().tenantId(), key, request, () -> {
+			Map<String, Object> body = request.isBlank() ? Map.of() : read(request);
+			String mode = body.get("orderEntryMode") == null ? null : String.valueOf(body.get("orderEntryMode"));
+			return json(orders.startDineIn(tableId, mode));
+		});
+	}
+
+	@PostMapping("/orders/takeaway")
+	public ResponseEntity<String> startTakeaway(@RequestHeader("Idempotency-Key") String key,
+			@RequestBody String raw) {
+		return idempotency.run(TenantContext.require().tenantId(), key, raw, () -> {
+			Map<String, Object> body = read(raw);
+			String name = body.get("customerName") == null ? null : String.valueOf(body.get("customerName"));
+			String phone = body.get("customerPhone") == null ? null : String.valueOf(body.get("customerPhone"));
+			return json(body.get("outletId") == null
+					? orders.startTakeaway(name, phone)
+					: orders.startTakeaway(requiredUuid(body.get("outletId"), "outletId"), name, phone));
+		});
+	}
+
+	@GetMapping("/orders/takeaway/active")
+	public List<Map<String, Object>> activeTakeaway(@RequestParam UUID outletId) {
+		return orders.activeTakeaway(outletId);
+	}
+
 	@GetMapping("/orders/{orderId}")
 	public Map<String, Object> get(@PathVariable UUID orderId) {
 		return orders.get(orderId);
@@ -126,7 +171,17 @@ public class OrderController {
 	@PostMapping("/outlets/{outletId}/orders/{orderId}/close")
 	public ResponseEntity<String> close(@PathVariable UUID outletId,@PathVariable UUID orderId,@RequestHeader("Idempotency-Key") String key){return idempotency.run(TenantContext.require().tenantId(),key,orderId.toString(),()->json(orders.close(outletId,orderId)));}
 
-	private static ResponseEntity<String> json(Map<String, Object> body) {
+	private ResponseEntity<String> json(Map<String, Object> body) {
+		try {
+			return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(jsonMapper.writeValueAsString(body));
+		} catch (JacksonException ex) {
+			throw new com.restaurant.platform.api.ApiException(
+					org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR, "ORDER_RESPONSE", "Could not serialize the order response");
+		}
+	}
+
+	@SuppressWarnings("unused")
+	private static ResponseEntity<String> legacyJson(Map<String, Object> body) {
 		StringBuilder sb = new StringBuilder("{");
 		boolean first = true;
 		for (var e : body.entrySet()) {
@@ -139,6 +194,16 @@ public class OrderController {
 		}
 		sb.append('}');
 		return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(sb.toString());
+	}
+
+	private static UUID requiredUuid(Object value, String field) {
+		if (value == null || String.valueOf(value).isBlank())
+			throw com.restaurant.platform.api.ApiException.bad("VALIDATION", field + " is required");
+		try {
+			return UUID.fromString(String.valueOf(value));
+		} catch (IllegalArgumentException ex) {
+			throw com.restaurant.platform.api.ApiException.bad("INVALID_ID", field + " must be a valid UUID");
+		}
 	}
 
 	@SuppressWarnings("unchecked")

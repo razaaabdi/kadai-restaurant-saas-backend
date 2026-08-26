@@ -33,6 +33,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 		if (h != null && h.startsWith("Bearer ")) {
 			try {
 				TenantPrincipal p = jwt.parse(h.substring(7));
+				if (request.getRequestURI().startsWith("/api/v1/platform/")
+						&& !request.getRequestURI().startsWith("/api/v1/platform/auth/")
+						&& !"platform".equals(p.typ())) {
+					throw new IllegalArgumentException("Platform token required");
+				}
 				TenantContext.set(p);
 				MDC.put("tenant_id", p.tenantId() == null ? "" : p.tenantId().toString());
 				MDC.put("user_id", p.userId() == null ? "" : p.userId().toString());

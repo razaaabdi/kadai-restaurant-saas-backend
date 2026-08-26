@@ -5,7 +5,6 @@ import com.restaurant.billing.infrastructure.InvoiceRepository;
 import com.restaurant.kitchen.infrastructure.KotEntity;
 import com.restaurant.kitchen.infrastructure.KotRepository;
 import com.restaurant.order.application.OrderService;
-import com.restaurant.order.domain.OrderStatus;
 import com.restaurant.order.infrastructure.OrderEntity;
 import com.restaurant.order.infrastructure.OrderLineEntity;
 import com.restaurant.order.infrastructure.OrderLineRepository;
@@ -53,21 +52,86 @@ public class WaiterOperationsService {
 		this.notifications = notifications; this.audit = audit; this.orderService = orderService; this.jdbc = jdbc;this.payments=payments;
 	}
 
+	@Transactional(readOnly = true)
 	public List<Map<String, Object>> activeOrders(UUID outletId, boolean mineOnly) {
 		requireOutlet(outletId);
 		UUID userId = TenantContext.require().userId();
-		return orders.findByOutletIdOrderByCreatedAtDesc(outletId).stream()
-				.filter(order -> order.getTableId() != null && (OrderStatus.open(order.getStatus()) || tables.findById(order.getTableId()).map(table -> Set.of("CLEANING_REQUIRED", "CLEANING").contains(table.getStatus())).orElse(false)))
-				.filter(order -> !mineOnly || userId == null || userId.equals(order.getAssignedWaiterId()))
-				.map(this::summary).toList();
+		String mineFilter = mineOnly && userId != null ? " AND o.assigned_waiter_id = ?" : "";
+		String sql = """
+				SELECT o.id AS order_id, o.table_id, o.status AS order_status,
+				       o.guest_count, o.created_at, o.subtotal_paise AS order_subtotal,
+				       o.tax_paise AS order_tax, o.discount_paise AS order_discount,
+				       o.service_charge_paise AS order_service_charge,
+				       t.code AS table_code, t.status AS table_status,
+				       waiter.waiter_id, waiter.waiter_name,
+				       COALESCE(line_stats.item_count, 0) AS item_count,
+				       COALESCE(line_stats.active_count, 0) AS active_count,
+				       COALESCE(line_stats.ready_count, 0) AS ready_count,
+				       COALESCE(line_stats.picked_count, 0) AS picked_count,
+				       COALESCE(line_stats.served_count, 0) AS served_count,
+				       COALESCE(line_stats.preparing_count, 0) AS preparing_count,
+				       COALESCE(kot_stats.kot_count, 0) AS kot_count,
+				       invoice.id AS invoice_id, invoice.status AS invoice_status,
+				       invoice.subtotal_paise AS invoice_subtotal,
+				       invoice.tax_paise AS invoice_tax,
+				       invoice.discount_paise AS invoice_discount,
+				       invoice.service_charge_paise AS invoice_service_charge,
+				       invoice.rounding_paise, invoice.total_paise AS invoice_total,
+				       COALESCE(payment_stats.paid_paise, 0) AS paid_paise
+				FROM orders o
+				JOIN tables t ON t.id = o.table_id AND t.deleted = FALSE
+				LEFT JOIN LATERAL (
+				    SELECT SUM(TRUNC(ol.qty))::BIGINT AS item_count,
+				           COUNT(*) FILTER (WHERE ol.fulfilment_status <> 'CANCELLED') AS active_count,
+				           COUNT(*) FILTER (WHERE ol.fulfilment_status = 'READY_FOR_PICKUP') AS ready_count,
+				           COUNT(*) FILTER (WHERE ol.fulfilment_status = 'PICKED_UP') AS picked_count,
+				           COUNT(*) FILTER (WHERE ol.fulfilment_status = 'SERVED') AS served_count,
+				           COUNT(*) FILTER (WHERE ol.fulfilment_status = 'PREPARING') AS preparing_count
+				    FROM order_lines ol WHERE ol.order_id = o.id
+				) line_stats ON TRUE
+				LEFT JOIN LATERAL (
+				    SELECT COUNT(*) AS kot_count FROM kots k WHERE k.order_id = o.id
+				) kot_stats ON TRUE
+				LEFT JOIN LATERAL (
+				    SELECT i.* FROM invoices i WHERE i.order_id = o.id
+				    ORDER BY i.created_at DESC LIMIT 1
+				) invoice ON TRUE
+				LEFT JOIN LATERAL (
+				    SELECT SUM(p.amount_paise) FILTER (WHERE p.status = 'SUCCESS') AS paid_paise
+				    FROM payments p WHERE p.invoice_id = invoice.id
+				) payment_stats ON TRUE
+				LEFT JOIN LATERAL (
+				    SELECT u.id AS waiter_id, u.name AS waiter_name
+				    FROM users u
+				    WHERE u.id = o.assigned_waiter_id AND u.status = 'ACTIVE'
+				      AND EXISTS (SELECT 1 FROM user_outlets uo WHERE uo.user_id = u.id AND uo.outlet_id = o.outlet_id)
+				      AND EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id AND r.code = 'WAITER')
+				      AND NOT EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id AND r.code = 'OWNER')
+				) waiter ON TRUE
+				WHERE o.outlet_id = ? AND o.table_id IS NOT NULL
+				  AND (o.status NOT IN ('COMPLETED', 'CANCELLED', 'VOIDED')
+				       OR t.status IN ('CLEANING_REQUIRED', 'CLEANING'))
+				""" + mineFilter + " ORDER BY o.created_at DESC";
+		Object[] args = mineOnly && userId != null ? new Object[] { outletId, userId } : new Object[] { outletId };
+		return jdbc.query(sql, (rs, rowNum) -> waiterSummaryRow(rs), args);
 	}
 
 	public Map<String, Object> detail(UUID outletId, UUID orderId) {
-		requireOutlet(outletId); OrderEntity order = requireOrder(orderId, outletId);
-		Map<String, Object> view = new LinkedHashMap<>(summary(order));
-		view.put("items", lines.findByOrderId(orderId).stream().map(this::lineView).toList());
-		view.put("kots", kots.findByOrderId(orderId).stream().map(this::kotView).toList());
-		view.put("timeline", timeline(order));
+		requireOutlet(outletId);
+		Map<String, Object> queueSummary = activeOrders(outletId, false).stream()
+				.filter(row -> orderId.equals(row.get("orderId"))).findFirst().orElse(null);
+		Map<String, Object> view;
+		if (queueSummary == null) {
+			OrderEntity order = requireOrder(orderId, outletId);
+			view = new LinkedHashMap<>(summary(order));
+		} else {
+			view = new LinkedHashMap<>(queueSummary);
+		}
+		List<OrderLineEntity> orderLines = lines.findByOrderId(orderId);
+		List<KotEntity> orderKots = kots.findByOrderId(orderId);
+		view.put("items", orderLines.stream().map(this::lineView).toList());
+		view.put("kots", orderKots.stream().map(this::kotView).toList());
+		view.put("timeline", timeline((Instant) view.get("startedAt"), orderKots));
 		return view;
 	}
 
@@ -171,6 +235,63 @@ public class WaiterOperationsService {
 		});
 	}
 
+	private Map<String, Object> waiterSummaryRow(java.sql.ResultSet rs) throws java.sql.SQLException {
+		UUID orderId = rs.getObject("order_id", UUID.class);
+		UUID invoiceId = rs.getObject("invoice_id", UUID.class);
+		boolean hasInvoice = invoiceId != null;
+		long active = rs.getLong("active_count");
+		long ready = rs.getLong("ready_count");
+		long picked = rs.getLong("picked_count");
+		long served = rs.getLong("served_count");
+		String service = aggregateCounts(active, served, picked, ready, rs.getLong("preparing_count"));
+		long paid = rs.getLong("paid_paise");
+		long total = hasInvoice ? rs.getLong("invoice_total") : rs.getLong("order_subtotal");
+		long due = Math.max(0, total - paid);
+		Map<String, Object> view = new LinkedHashMap<>();
+		view.put("orderId", orderId);
+		view.put("orderNumber", orderId.toString().substring(0, 8).toUpperCase());
+		view.put("tableId", rs.getObject("table_id", UUID.class));
+		view.put("tableCode", rs.getString("table_code"));
+		view.put("tableStatus", rs.getString("table_status"));
+		view.put("assignedWaiterId", rs.getObject("waiter_id", UUID.class));
+		view.put("assignedWaiterName", rs.getString("waiter_name"));
+		view.put("guestCount", rs.getInt("guest_count"));
+		view.put("startedAt", rs.getTimestamp("created_at").toInstant());
+		view.put("orderStatus", rs.getString("order_status"));
+		view.put("itemCount", rs.getLong("item_count"));
+		view.put("kotCount", rs.getLong("kot_count"));
+		view.put("readyCount", ready);
+		view.put("pickedUpCount", picked);
+		view.put("servedCount", served);
+		view.put("kitchenProgress", service);
+		view.put("serviceStatus", service);
+		String invoiceStatus = rs.getString("invoice_status");
+		view.put("invoiceStatus", !hasInvoice ? "NOT_GENERATED" : "VOID".equals(invoiceStatus) ? "VOID" : "GENERATED");
+		view.put("paymentStatus", !hasInvoice ? "NOT_STARTED" : due == 0 ? "PAID" : paid > 0 ? "PARTIALLY_PAID" : "AWAITING_PAYMENT");
+		view.put("subtotalPaise", hasInvoice ? rs.getLong("invoice_subtotal") : rs.getLong("order_subtotal"));
+		view.put("taxPaise", hasInvoice ? rs.getLong("invoice_tax") : rs.getLong("order_tax"));
+		view.put("discountPaise", hasInvoice ? rs.getLong("invoice_discount") : rs.getLong("order_discount"));
+		view.put("serviceChargePaise", hasInvoice ? rs.getLong("invoice_service_charge") : rs.getLong("order_service_charge"));
+		view.put("roundingAdjustmentPaise", hasInvoice ? rs.getLong("rounding_paise") : 0L);
+		view.put("totalPaise", total);
+		view.put("paidPaise", paid);
+		view.put("amountDuePaise", due);
+		view.put("runningAmountPaise", total);
+		return view;
+	}
+
+	private static String aggregateCounts(long active, long served, long picked, long ready, long preparing) {
+		if (active == 0) return "CANCELLED";
+		if (served == active) return "SERVED";
+		if (served > 0) return "PARTIALLY_SERVED";
+		if (picked + served == active) return "PICKED_UP";
+		if (picked > 0) return "PARTIALLY_PICKED_UP";
+		if (ready + picked + served == active) return "READY";
+		if (ready > 0) return "PARTIALLY_READY";
+		if (preparing > 0) return "PREPARING";
+		return "NEW";
+	}
+
 	private Map<String, Object> summary(OrderEntity order) {
 		TableEntity table = tables.findById(order.getTableId()).orElse(null); List<OrderLineEntity> orderLines = lines.findByOrderId(order.getId()); List<KotEntity> orderKots = kots.findByOrderId(order.getId());
 		Map<String, Object> view = new LinkedHashMap<>(); view.put("orderId", order.getId()); view.put("orderNumber", order.getId().toString().substring(0, 8).toUpperCase());
@@ -191,7 +312,7 @@ public class WaiterOperationsService {
 	private Map<String, Object> lineView(OrderLineEntity line) { Map<String,Object> view = new LinkedHashMap<>(); view.put("id", line.getId()); view.put("roundId", line.getRoundId()); view.put("name", line.getNameSnapshot()); view.put("quantity", line.getQty()); view.put("unitPaise", line.getUnitPaise()); view.put("linePaise", line.getLinePaise()); view.put("status", line.getFulfilmentStatus()); view.put("notes", line.getNotes()); view.put("pickedUpAt", line.getPickedUpAt()); view.put("servedAt", line.getServedAt()); view.put("version", line.getVersion()); return view; }
 	private Map<String, Object> kotView(KotEntity kot) { return Map.of("id", kot.getId(), "roundId", kot.getRoundId(), "kotNumber", kot.getKotNumber(), "status", kot.getStatus()); }
 	private Map<String, Object> notificationView(WaiterNotificationEntity n) { Map<String,Object> view = new LinkedHashMap<>(); view.put("id", n.getId()); view.put("eventType", n.getEventType()); view.put("orderId", n.getOrderId()); view.put("tableId", n.getTableId()); view.put("kotId", n.getKotId()); view.put("relatedItemIds", n.getRelatedItemIds()); view.put("message", n.getMessage()); view.put("destination", n.getDestination()); view.put("acknowledged", n.isAcknowledged()); view.put("createdAt", n.getCreatedAt()); return view; }
-	private List<Map<String,Object>> timeline(OrderEntity order) { List<Map<String,Object>> result = new ArrayList<>(); result.add(Map.of("type", "ORDER_OPENED", "at", order.getCreatedAt(), "label", "Order opened")); for (KotEntity kot : kots.findByOrderId(order.getId())) result.add(Map.of("type", "KOT", "label", "KOT-" + kot.getKotNumber() + " · " + kot.getStatus())); return result; }
+	private List<Map<String,Object>> timeline(Instant startedAt, List<KotEntity> orderKots) { List<Map<String,Object>> result = new ArrayList<>(); result.add(Map.of("type", "ORDER_OPENED", "at", startedAt, "label", "Order opened")); for (KotEntity kot : orderKots) result.add(Map.of("type", "KOT", "label", "KOT-" + kot.getKotNumber() + " · " + kot.getStatus())); return result; }
 	private OrderLineEntity requireLine(UUID orderId, UUID itemId) { OrderLineEntity line = lines.findById(itemId).orElseThrow(() -> ApiException.notFound("ORDER_ITEM", "Order item not found")); if (!orderId.equals(line.getOrderId())) throw ApiException.bad("ORDER_ITEM", "Item does not belong to this order"); return line; }
 	private OrderEntity requireOrder(UUID orderId, UUID outletId) { requireOutlet(outletId); OrderEntity order = orders.findById(orderId).orElseThrow(() -> ApiException.notFound("ORDER", "Order not found")); if (!outletId.equals(order.getOutletId())) throw ApiException.bad("ORDER_OUTLET", "Order does not belong to this outlet"); return order; }
 	private void requireServiceOwner(OrderEntity order) { var p=TenantContext.require(); if (p.hasRole("WAITER") && order.getAssignedWaiterId()!=null && !order.getAssignedWaiterId().equals(p.userId()) && !(p.hasRole("OWNER")||p.hasRole("MANAGER")||p.hasRole("SHIFT_MANAGER"))) throw ApiException.forbidden("WAITER_ASSIGNMENT", "This table is assigned to another waiter"); }

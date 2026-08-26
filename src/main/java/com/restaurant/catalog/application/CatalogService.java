@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 public class CatalogService {
@@ -117,13 +119,20 @@ public class CatalogService {
 
 	public List<Map<String, Object>> channelMenu(UUID outletId, boolean qr) {
 		requireReadableOutlet(outletId);
+		List<ItemEntity> menuItems = items.findByOutletIdAndDeletedFalse(outletId);
+		Map<UUID, List<VariantEntity>> variantsByItem = menuItems.isEmpty() ? Map.of()
+				: variants.findByItemIdIn(menuItems.stream().map(ItemEntity::getId).toList()).stream()
+						.collect(Collectors.groupingBy(VariantEntity::getItemId));
+		Map<UUID, CategoryEntity> categoriesById = categories.findAllById(menuItems.stream()
+				.map(ItemEntity::getCategoryId).distinct().toList()).stream()
+				.collect(Collectors.toMap(CategoryEntity::getId, Function.identity()));
 		List<Map<String, Object>> out = new ArrayList<>();
-		for (ItemEntity i : items.findByOutletIdAndDeletedFalse(outletId)) {
+		for (ItemEntity i : menuItems) {
 			if (i.isDeleted() || (qr && i.isEightySixed()))
 				continue;
 			if (qr && !i.isAvailableOnQr())
 				continue;
-			for (VariantEntity v : variants.findByItemId(i.getId())) {
+			for (VariantEntity v : variantsByItem.getOrDefault(i.getId(), List.of())) {
 				if (!v.getItemId().equals(i.getId()))
 					continue;
 				Map<String, Object> row = new LinkedHashMap<>();
@@ -133,7 +142,7 @@ public class CatalogService {
 				row.put("variant", v.getName());
 				row.put("pricePaise", v.getPricePaise());
 				row.put("description", i.getDescription()); row.put("image", i.getImageUrl());
-				CategoryEntity category = categories.findById(i.getCategoryId()).orElse(null);
+				CategoryEntity category = categoriesById.get(i.getCategoryId());
 				row.put("categoryId", i.getCategoryId()); row.put("category", category == null ? "Uncategorized" : category.getName());
 				row.put("available", !i.isEightySixed() && i.isAvailableOnCounter());
 				out.add(row);
@@ -171,7 +180,7 @@ public class CatalogService {
 		if (category.isDeleted() || !outletId.equals(category.getOutletId())) throw ApiException.bad("CATEGORY_OUTLET", "Category does not belong to this outlet");
 	}
 	private static String text(String value, String field, int max, boolean optional) { if (value == null) value = ""; value = value.trim(); if (!optional && value.isEmpty()) throw ApiException.bad("VALIDATION", field + " is required"); if (value.length() > max) throw ApiException.bad("VALIDATION", field + " must be " + max + " characters or fewer"); return value; }
-	private static String image(String value) { if (value == null || value.isBlank()) return null; value = value.trim(); if (value.length() > 2048 || !(value.startsWith("https://") || value.startsWith("http://"))) throw ApiException.bad("VALIDATION", "Image must be a valid HTTP(S) URL"); return value; }
+	private static String image(String value) { if (value == null || value.isBlank()) return null; value = value.trim(); boolean uploaded=value.matches("/api/v1/public/menu-images/[0-9a-fA-F-]{36}"); if (value.length() > 2048 || (!(value.startsWith("https://") || value.startsWith("http://")) && !uploaded)) throw ApiException.bad("VALIDATION", "Image must be an uploaded menu image or a valid HTTP(S) URL"); return value; }
 	private static void requireStaffOutlet(UUID outletId) { var p = TenantContext.require(); if (p.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Guests cannot manage the menu"); if (p.outletIds() == null || !p.outletIds().contains(outletId)) throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet"); }
 	private static void requireReadableOutlet(UUID outletId) { var p = TenantContext.require(); if (p.isGuest()) { if (!outletId.equals(p.outletId())) throw ApiException.forbidden("OUTLET_ACCESS", "Wrong outlet"); } else if (p.outletIds() == null || !p.outletIds().contains(outletId)) throw ApiException.forbidden("OUTLET_ACCESS", "You do not have access to this outlet"); }
 

@@ -63,6 +63,16 @@ public class JwtService {
 				.build());
 	}
 
+	public String platformToken(UUID administratorId) {
+		return sign(new JWTClaimsSet.Builder()
+				.subject(administratorId.toString())
+				.claim("typ", "platform")
+				.claim("roles", List.of("SUPER_ADMIN"))
+				.issueTime(new Date())
+				.expirationTime(Date.from(Instant.now().plusSeconds(props.getJwt().getStaffTtlSeconds())))
+				.build());
+	}
+
 	public String refreshToken() {
 		byte[] b = new byte[32];
 		new java.security.SecureRandom().nextBytes(b);
@@ -80,6 +90,10 @@ public class JwtService {
 				throw ApiException.unauthorized("Expired token");
 			}
 			String typ = str(c, "typ");
+			if ("platform".equals(typ)) {
+				return new TenantPrincipal(null, UUID.fromString(c.getSubject()), List.of(), Set.of("SUPER_ADMIN"), typ,
+						null, null, null, null);
+			}
 			UUID tenant = UUID.fromString(str(c, "tenant_id"));
 			if ("table_guest".equals(typ)) {
 				return new TenantPrincipal(tenant, null, List.of(), Set.of("GUEST"), typ,

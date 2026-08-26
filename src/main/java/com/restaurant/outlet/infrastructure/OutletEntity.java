@@ -35,6 +35,8 @@ public class OutletEntity {
 	public UUID getBrandId() { return brandId; }
 	public void setBrandId(UUID brandId) { this.brandId = brandId; }
 	public String getName() { return name; }
+	public String getTimezone() { return timezone; }
+	public boolean isTakeawayEnabled() { return takeawayEnabled; }
 	public void setName(String name) { this.name = name; }
 	public void setSlug(String slug) { this.slug = slug; }
 	public boolean isAllowNegativeStock() { return allowNegativeStock; }

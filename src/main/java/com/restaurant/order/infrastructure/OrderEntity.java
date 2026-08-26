@@ -3,7 +3,9 @@ package com.restaurant.order.infrastructure;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
+import java.time.LocalDate;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -14,6 +16,12 @@ public class OrderEntity {
 	private UUID tenantId;
 	private UUID outletId;
 	private UUID tableId;
+	private String orderNumber;
+	private String orderType;
+	private String orderEntryMode;
+	private String tokenNumber;
+	private String customerName;
+	private String customerPhone;
 	private String channel;
 	private String status;
 	private UUID assignedWaiterId;
@@ -25,7 +33,10 @@ public class OrderEntity {
 	private long packagingPaise;
 	private long taxPaise;
 	private long totalPaise;
+	private LocalDate businessDate;
+	private UUID createdBy;
 	private Instant createdAt = Instant.now();
+	@Version private long version;
 
 	public UUID getId() { return id; }
 	public UUID getTenantId() { return tenantId; }
@@ -34,6 +45,18 @@ public class OrderEntity {
 	public void setOutletId(UUID outletId) { this.outletId = outletId; }
 	public UUID getTableId() { return tableId; }
 	public void setTableId(UUID tableId) { this.tableId = tableId; }
+	public String getOrderNumber() { return orderNumber; }
+	public void setOrderNumber(String orderNumber) { this.orderNumber = orderNumber; }
+	public String getOrderType() { return orderType; }
+	public void setOrderType(String orderType) { this.orderType = orderType; }
+	public String getOrderEntryMode() { return orderEntryMode; }
+	public void setOrderEntryMode(String orderEntryMode) { this.orderEntryMode = orderEntryMode; }
+	public String getTokenNumber() { return tokenNumber; }
+	public void setTokenNumber(String tokenNumber) { this.tokenNumber = tokenNumber; }
+	public String getCustomerName() { return customerName; }
+	public void setCustomerName(String customerName) { this.customerName = customerName; }
+	public String getCustomerPhone() { return customerPhone; }
+	public void setCustomerPhone(String customerPhone) { this.customerPhone = customerPhone; }
 	public String getChannel() { return channel; }
 	public void setChannel(String channel) { this.channel = channel; }
 	public String getStatus() { return status; }
@@ -57,4 +80,9 @@ public class OrderEntity {
 	public void setTaxPaise(long taxPaise) { this.taxPaise = taxPaise; }
 	public long getTotalPaise() { return totalPaise; }
 	public void setTotalPaise(long totalPaise) { this.totalPaise = totalPaise; }
+	public LocalDate getBusinessDate() { return businessDate; }
+	public void setBusinessDate(LocalDate businessDate) { this.businessDate = businessDate; }
+	public UUID getCreatedBy() { return createdBy; }
+	public void setCreatedBy(UUID createdBy) { this.createdBy = createdBy; }
+	public long getVersion() { return version; }
 }

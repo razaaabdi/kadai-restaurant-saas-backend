@@ -54,3 +54,18 @@ tasks.named('test') {
 tasks.withType(JavaCompile).configureEach {
 	options.compilerArgs += ['-parameters']
 }
+
+tasks.register('installGitHooks', Exec) {
+	group = 'development'
+	description = 'Configures this repository to use the version-controlled Git hooks.'
+	onlyIf { file('.git').exists() }
+	commandLine 'git', 'config', '--local', 'core.hooksPath', '.githooks'
+	doLast {
+		file('.githooks/pre-commit').setExecutable(true)
+		logger.lifecycle('Git hooks installed from .githooks.')
+	}
+}
+
+tasks.named('classes') {
+	dependsOn tasks.named('installGitHooks')
+}
