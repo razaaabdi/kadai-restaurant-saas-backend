@@ -36,6 +36,7 @@ public abstract class AbstractIT {
 		r.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
 		r.add("app.jwt.secret", () -> "test-secret-must-be-32-bytes-min!");
 		r.add("app.outbox.poller", () -> "false");
+		r.add("app.legacy-onboarding-enabled", () -> "true");
 		r.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
 	}
 

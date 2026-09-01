@@ -9,6 +9,7 @@ import com.nimbusds.jwt.SignedJWT;
 import com.restaurant.platform.api.ApiException;
 import com.restaurant.platform.api.AppProperties;
 import com.restaurant.platform.api.TenantPrincipal;
+import com.restaurant.platform.api.PlatformTokenService;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -22,7 +23,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
-public class JwtService {
+public class JwtService implements PlatformTokenService {
 	private final AppProperties props;
 
 	public JwtService(AppProperties props) {

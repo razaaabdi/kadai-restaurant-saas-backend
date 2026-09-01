@@ -50,8 +50,10 @@ public class OrderConfigurationService {
 	@Transactional(readOnly = true)
 	public OrderConfigurationResponse effective(UUID outletId) {
 		var principal = TenantContext.require();
-		if (principal.isGuest()) throw ApiException.forbidden("STAFF_ONLY", "Staff access required");
-		if (outletId != null) access(outletId, false);
+		if (principal.isGuest()) {
+			if (outletId == null || !outletId.equals(principal.outletId()))
+				throw ApiException.forbidden("OUTLET_ACCESS", "Guests can read configuration only for their table outlet");
+		} else if (outletId != null) access(outletId, false);
 		ConfigEntryEntity tenant = tenant(principal.tenantId()).orElse(null);
 		ConfigEntryEntity outlet = outletId == null ? null : outlet(principal.tenantId(), outletId).orElse(null);
 		Map<String, Object> result = new LinkedHashMap<>(DEFAULTS);

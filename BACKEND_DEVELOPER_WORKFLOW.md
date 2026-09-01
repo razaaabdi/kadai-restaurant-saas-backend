@@ -296,6 +296,22 @@ Do not release a billed or paid table while active service work remains.
 
 Migrations live in `src/main/resources/db/migration` and execute in version order during application startup.
 
+`V18__inventory_stock_engine.sql` is the forward-only inventory expansion. It follows the already-applied `V11__menu_item_image_storage.sql` and the V12-V17 platform sequence. Existing databases at V17 apply the inventory expansion as V18; clean databases retain exactly one migration per version. Do not rename this migration back to V11.
+
+`V19__platform_subscription_lifecycle.sql` adds the global subscription-plan catalog, authoritative tenant subscriptions and immutable history, and versioned tenant/outlet lifecycle fields. Restaurant provisioning is restricted to `POST /api/v1/platform/restaurants`; legacy public onboarding returns `403` unless `app.legacy-onboarding-enabled=true`, which is reserved for integration fixtures and controlled migrations. Provisioning creates the tenant, brand, first outlet, owner setup token, subscription, and audit record atomically. Tenant/outlet status and subscription commands require `If-Match`; restaurant owners read their assigned outlets, subscription, and features through `/api/v1/me/*`.
+
+`SubscriptionLifecycleService` evaluates subscriptions hourly by default (`app.subscription.lifecycle-cron`). It records `EXPIRING_SOON`, `GRACE_PERIOD`, and `EXPIRED` transitions in subscription history and audit data. The first seven days after the end date are the grace period. Expiry immediately blocks new orders and additional rounds and marks an active tenant `SUBSCRIPTION_EXPIRED`; billing, payment, fulfilment, cancellation, and closing remain available so existing work can finish. Renewal restores a tenant that was expired automatically.
+
+`V20__billing_payment_integrity.sql` safely enforces valid new invoice/payment writes while tolerating unverified legacy rows through `NOT VALID` checks. Advisory-lock triggers serialize invoice-per-order and KOT-per-round creation without requiring a potentially unsafe unique-index deployment. Payment recording locks the invoice, accepts only `CASH`, `UPI`, or `CARD` with a positive amount, and changes a fully settled invoice to `PAID`. Completing a paid dine-in order releases its table directly to `FREE` under the V1 baseline; the optional cleaning workflow remains available for manual operational use but is not forced after payment.
+
+`V21__order_inventory_consumption.sql` records one inventory-consumption marker per completed order. Recipe stock is no longer deducted when a KOT is confirmed; completion posts every captured recipe version exactly once in the same transaction. Orders cancelled before completion therefore consume nothing. `POST /api/v1/recipes` accepts an `ingredients` array to create one immutable multi-ingredient recipe version, while the legacy single-ingredient request remains compatible.
+
+`V22__kot_print_jobs.sql` persists an initial KOT print job before dispatch and records reprints separately with a reason, attempts, print timestamp, and failure detail. `app.kot.printer-enabled` defaults to `false`, which deliberately marks jobs `FAILED` rather than pretending a printer exists. Kitchen users can request `/kots/{id}/reprint` or `/kots/{id}/retry-print`; the scheduled retry worker retries failed jobs up to five times. A production printer adapter should be enabled only after its delivery path is configured and monitored.
+
+Entities with application-assigned UUIDs and optimistic locking use nullable `Long` versions. A null version tells Spring Data that a UUID-bearing instance is new and must be persisted; exposing version `0` through API views preserves the existing optimistic-concurrency contract. Do not change these fields back to primitive `long`, which causes new records to be merged and can produce a stale-version conflict inside their creation transaction.
+
+Cross-module dependencies must go through a declared named interface. Platform authentication depends on the platform-owned `PlatformTokenService` contract, implemented by identity, so the platform module does not import identity implementation classes. Payment totals used by order and waiter flows go through `PaymentFacade`; consumers must not import payment repositories or entities.
+
 1. Inspect the latest version before choosing the next number.
 2. Add `V<number>__descriptive_name.sql`.
 3. Never modify a migration applied to a shared database.
@@ -414,7 +430,35 @@ or on macOS and Linux with:
 
 If a change genuinely does not affect developer guidance, bypass once with `SKIP_BACKEND_DEVELOPER_DOC_CHECK=1`. Do not add meaningless documentation edits.
 
-## 20. Contribution checklist
+## 20. Outlet reporting read models
+
+The `reporting` module exposes owner-facing outlet read models under `/api/v1/outlets/{outletId}`: `dashboard`, `daily-sales`, `reports/sales`, `reports/top-items`, `reports/payment-mix`, and `alerts`. Every endpoint obtains the tenant from `TenantContext` and requires a non-guest principal assigned to the requested outlet.
+
+Daily and range sales use `outlet_daily_sales`, which is populated through the outbox projection. Top items use PAID invoice snapshots and payment mix uses successful payment records. Dashboard attention alerts use current inventory balances and reorder levels. Reporting ranges are inclusive and capped at 93 days to keep read queries bounded. These endpoints are read-only and should remain free of side effects.
+
+`GET /api/v1/audit-log` returns the recent tenant operational history to an `OWNER` only. It is deliberately tenant-wide, since older `audit_log` records are not outlet-labelled; do not expose it to narrower outlet roles until new audit events carry a durable outlet scope.
+
+### Unpaid bill revision
+
+A generated bill may be reopened through the existing order `unlock-add` command only before a successful payment exists. Reopening voids the generated invoice while retaining its immutable snapshot, returns the order to `READY`, and permits another round. Generating the bill again creates a new invoice from all current order lines. Any successful (including partial) payment blocks reopening; paid invoices are never edited. Migration `V23` permits invoice history while enforcing at most one `GENERATED` invoice per order.
+
+Financial-control work begins with `V24`'s append-only `invoice_amendments` ledger. Amendment request, approval, and application must be explicit server-side commands; store only a short-lived token hash, never an approver password or PIN.
+
+`V25` introduces tenant-wide invoice numbering and `V26` safely assigns non-colliding `INV-LEGACY-*` numbers to older rows while protecting the sequence table with tenant RLS. Invoice search is available at `GET /api/v1/outlets/{outletId}/invoices`; `GET /api/v1/invoices/{invoiceId}` returns the immutable line snapshot, payments, amendments, and invoice audit trail. Financial amendments use explicit request, manager/owner approval, and one-time apply commands. Approval credentials are verified server-side and are never persisted.
+
+## 21. Contribution checklist
+
+### Owner-managed role permissions
+
+### Orphaned table reconciliation
+
+Reconciliation updates the table status and optimistic-lock version only. The `tables` schema has no `updated_at` column, so native table-status mutations must not attempt to write one.
+
+Operational statuses `OCCUPIED` and `BILL_REQUESTED` are order-controlled and cannot be assigned or cleared through the generic table update command. Terminal generic order transitions release their table. `POST /api/v1/outlets/{outletId}/tables/reconcile` is an owner/manager, tenant-and-outlet-scoped repair command that resets only occupied/bill-requested tables for which no non-terminal order exists. It increments table versions and audits repairs; it never changes a table that still has an active order.
+
+`PUT /api/v1/users/roles/{roleCode}/permissions` replaces the selected non-owner role's permission set for the authenticated tenant. Only an `OWNER` may call it; the `OWNER` role is immutable and always retains the complete tenant permission catalog. Permission codes are validated against the tenant catalog, the replacement and audit event are transactional, and refresh tokens for users assigned to the changed role are revoked so stale authorization cannot survive a role update. The UI must communicate that affected staff need to sign in again.
+
+Migration `V27` adds `roles.permissions_customized`. Default permission seeding skips customized roles so removed permissions, including an intentionally empty role, are not silently restored when access services seed the tenant catalog.
 
 - [ ] The owning module and existing flow were traced.
 - [ ] API, application, domain, and infrastructure responsibilities remain separated.
@@ -431,3 +475,9 @@ If a change genuinely does not affect developer guidance, bypass once with `SKIP
 - [ ] Secrets and sensitive data are absent from code, docs, and logs.
 - [ ] `BACKEND_DEVELOPER_WORKFLOW.md` reflects the change.
 - [ ] `gradlew test` passes and the result is reported.
+## Owner multi-outlet management
+
+Restaurant owners can list and create their tenant's branches through `/api/v1/me/outlets`. Branch creation is tenant-scoped, audited, serialized against the subscription row, and rejected when the effective subscription outlet limit is reached. Every owner account in the tenant is assigned to a newly created branch through `user_outlets`; clients must refresh authentication after creation so JWT outlet scope includes the branch. `GET /api/v1/users/outlets` is safe for the shared workspace selector: owners receive tenant branches, while other staff receive only branches present in their authenticated outlet scope. Operational APIs continue to enforce the selected outlet against the authenticated `outletIds` claim.
+## Operational dashboard
+
+The restaurant dashboard uses tenant- and outlet-scoped read endpoints under `/api/v1/outlets/{outletId}/dashboard`. Summary comparisons use the previous equivalent date range; settled sales come only from successful payments and remain integer paise. Order totals use the persisted restaurant `business_date`, while payment time buckets use the outlet timezone. Overview, order-status, recent-order, and debounced search projections are database aggregations/read models rather than in-memory entity scans. Rating is intentionally unavailable until a real review domain exists.

@@ -16,6 +16,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 import java.util.UUID;
+import java.util.Locale;
+import java.util.Set;
 
 @Service
 public class PaymentFacade {
@@ -34,6 +36,14 @@ public class PaymentFacade {
 		this.events = events;
 	}
 
+	@Transactional(readOnly = true)
+	public long successfulAmount(UUID invoiceId) {
+		return payments.findByInvoiceId(invoiceId).stream()
+				.filter(payment -> "SUCCESS".equals(payment.getStatus()))
+				.mapToLong(PaymentEntity::getAmountPaise)
+				.sum();
+	}
+
 	@Transactional
 	public Map<String, Object> record(UUID invoiceId, String method, long tenderedPaise) {
 		var p = TenantContext.require();
@@ -41,17 +51,22 @@ public class PaymentFacade {
 		if (!(p.hasRole("OWNER") || p.hasRole("MANAGER") || p.hasRole("CASHIER"))) {
 			throw ApiException.forbidden("RBAC", "Cashier role required");
 		}
-		InvoiceEntity inv = billing.require(invoiceId);
+		String normalizedMethod=method==null?"":method.trim().toUpperCase(Locale.ROOT);
+		if(!Set.of("CASH","UPI","CARD").contains(normalizedMethod))throw ApiException.bad("PAYMENT_METHOD","Payment method must be CASH, UPI, or CARD");
+		if(tenderedPaise<=0)throw ApiException.bad("PAYMENT_AMOUNT","Payment amount must be greater than zero");
+		InvoiceEntity inv = billing.lock(invoiceId);
+		if("VOID".equals(inv.getStatus()))throw ApiException.conflict("INVOICE_VOID","A void invoice cannot be paid");
 		long already = payments.findByInvoiceId(invoiceId).stream()
 				.filter(x -> "SUCCESS".equals(x.getStatus()))
 				.mapToLong(PaymentEntity::getAmountPaise).sum();
 		long remaining = inv.getTotalPaise() - already;
+		if(remaining<=0||"PAID".equals(inv.getStatus()))throw ApiException.conflict("INVOICE_PAID","Invoice is already fully paid");
 		long applied = Math.min(tenderedPaise, remaining);
 		long change = Math.max(0, tenderedPaise - remaining);
 		PaymentEntity pay = new PaymentEntity();
 		pay.setTenantId(p.tenantId());
 		pay.setInvoiceId(invoiceId);
-		pay.setMethod(method);
+		pay.setMethod(normalizedMethod);
 		pay.setAmountPaise(inv.getTotalPaise() == 0 ? 0 : applied);
 		pay.setChangePaise(change);
 		pay.setStatus("SUCCESS");
@@ -74,7 +89,7 @@ public class PaymentFacade {
 							+ "\",\"gmv\":" + inv.getTotalPaise()
 							+ ",\"discount\":" + inv.getDiscountPaise()
 							+ ",\"tax\":" + inv.getTaxPaise()
-							+ ",\"method\":\"" + method + "\"}");
+							+ ",\"method\":\"" + normalizedMethod + "\"}");
 			events.publishEvent(new InvoicePaid(p.tenantId(), inv.getOrderId(), null));
 		}
 		return Map.of("paymentId", pay.getId(), "invoicePaid", paid, "changePaise", change, "orderId", inv.getOrderId());

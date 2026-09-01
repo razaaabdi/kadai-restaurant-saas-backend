@@ -5,6 +5,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -20,5 +21,6 @@ public class StaffUserController {
 	@GetMapping public java.util.List<Map<String,Object>> list() { return access.staff(); }
 	@GetMapping("/access-catalog") public Map<String,Object> catalog() { return access.catalog(); }
 	@GetMapping("/outlets") public java.util.List<Map<String,Object>> outlets() { return access.outlets(); }
+	@PutMapping("/roles/{roleCode}/permissions") public Map<String,Object> updateRolePermissions(@PathVariable String roleCode, @RequestBody Map<String, List<String>> body) { return access.updateRolePermissions(roleCode, body.get("permissions")); }
 	@PutMapping("/{userId}") public Map<String,Object> update(@PathVariable UUID userId, @RequestHeader("If-Match") long version, @RequestBody Map<String,Object> body) { return access.update(userId, body, version); }
 }

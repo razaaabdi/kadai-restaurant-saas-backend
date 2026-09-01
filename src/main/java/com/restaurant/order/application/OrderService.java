@@ -8,6 +8,7 @@ import com.restaurant.catalog.infrastructure.VariantEntity;
 import com.restaurant.configuration.application.OrderConfigurationService;
 import com.restaurant.configuration.application.OrderSettings;
 import com.restaurant.inventory.api.InventoryFacade;
+import com.restaurant.inventory.api.RecipeConsumption;
 import com.restaurant.order.domain.OrderEntryMode;
 import com.restaurant.order.domain.OrderStatus;
 import com.restaurant.order.domain.OrderType;
@@ -19,8 +20,7 @@ import com.restaurant.order.infrastructure.OrderLineRepository;
 import com.restaurant.order.infrastructure.OrderRepository;
 import com.restaurant.order.infrastructure.OrderRoundEntity;
 import com.restaurant.order.infrastructure.OrderRoundRepository;
-import com.restaurant.payment.infrastructure.PaymentEntity;
-import com.restaurant.payment.infrastructure.PaymentRepository;
+import com.restaurant.payment.api.PaymentFacade;
 import com.restaurant.kitchen.infrastructure.KotRepository;
 import com.restaurant.outlet.api.QrLookup;
 import com.restaurant.outlet.application.FloorService;
@@ -36,6 +36,7 @@ import com.restaurant.platform.api.AuditWriter;
 import com.restaurant.platform.api.OutboxPublisher;
 import com.restaurant.platform.api.TenantContext;
 import com.restaurant.platform.api.TenantPrincipal;
+import com.restaurant.platform.api.SubscriptionPolicy;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -50,6 +51,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -63,18 +65,19 @@ public class OrderService {
 	private final FloorService floor;
 	private final BillingFacade billing;
 	private final ApplicationEventPublisher events;
-	private final PaymentRepository payments;
+	private final PaymentFacade payments;
 	private final KotRepository kots;
 	private final AuditWriter audit;
 	private final OutboxPublisher outbox;
 	private final OrderConfigurationService configuration;
 	private final JdbcTemplate jdbc;
+	private final SubscriptionPolicy subscriptions;
 
 	public OrderService(OrderRepository orders, OrderRoundRepository rounds, OrderLineRepository lines,
 			OrderLineModifierRepository lineMods, CatalogService catalog, InventoryFacade inventory,
-			FloorService floor, BillingFacade billing, ApplicationEventPublisher events,PaymentRepository payments,
+			FloorService floor, BillingFacade billing, ApplicationEventPublisher events,PaymentFacade payments,
 			KotRepository kots,AuditWriter audit,OutboxPublisher outbox,
-			OrderConfigurationService configuration, JdbcTemplate jdbc) {
+			OrderConfigurationService configuration, JdbcTemplate jdbc, SubscriptionPolicy subscriptions) {
 		this.orders = orders;
 		this.rounds = rounds;
 		this.lines = lines;
@@ -87,6 +90,7 @@ public class OrderService {
 		this.payments=payments;this.kots=kots;this.audit=audit;this.outbox=outbox;
 		this.configuration = configuration;
 		this.jdbc = jdbc;
+		this.subscriptions = subscriptions;
 	}
 
 	@Transactional
@@ -113,6 +117,7 @@ public class OrderService {
 	@Transactional
 	public Map<String, Object> startDineIn(UUID outletId, UUID tableId, String requestedMode) {
 		TenantPrincipal p = requireStaffWithOutlet(outletId);
+		subscriptions.assertNewWorkAllowed(p.tenantId());
 		OrderSettings settings = configuration.settings(outletId);
 		if (!settings.dineInEnabled()) throw ApiException.conflict("DINE_IN_DISABLED", "Dine-in ordering is disabled for this outlet");
 		var table = floor.lockForOrder(tableId);
@@ -149,6 +154,7 @@ public class OrderService {
 	@Transactional
 	public Map<String, Object> startTakeaway(UUID outletId, String customerName, String customerPhone) {
 		TenantPrincipal p = requireStaffWithOutlet(outletId);
+		subscriptions.assertNewWorkAllowed(p.tenantId());
 		OrderSettings settings = configuration.settings(outletId);
 		if (!settings.takeawayEnabled() || !floor.outlet(outletId).isTakeawayEnabled())
 			throw ApiException.conflict("TAKEAWAY_DISABLED", "Takeaway ordering is disabled for this outlet");
@@ -235,8 +241,10 @@ public class OrderService {
 		if (!floor.outlet(o.getOutletId()).isUnlockAddBeforeBill()) {
 			throw ApiException.conflict("LOCKED", "Unlock disabled");
 		}
-		if (!OrderStatus.BILL_REQUESTED.equals(o.getStatus())) {
-			throw ApiException.conflict("ORDER_ILLEGAL_STATUS", "Not bill requested");
+		if (OrderStatus.BILLED.equals(o.getStatus())) {
+			billing.voidUnpaidForRevision(o.getId());
+		} else if (!OrderStatus.BILL_REQUESTED.equals(o.getStatus())) {
+			throw ApiException.conflict("ORDER_ILLEGAL_STATUS", "Only an unpaid bill can be reopened");
 		}
 		o.setStatus(OrderStatus.READY);
 		o.setGuestFrozen(false);
@@ -264,6 +272,7 @@ public class OrderService {
 		OrderEntity o = requireOwn(orderId);
 		OrderStatus.assertTransition(o.getStatus(), status);
 		o.setStatus(status);
+		if (o.getTableId() != null && Set.of(OrderStatus.COMPLETED, OrderStatus.CANCELLED, OrderStatus.VOIDED).contains(status)) floor.clearTable(o.getTableId());
 		orders.save(o);
 		return toView(o);
 	}
@@ -322,7 +331,7 @@ public class OrderService {
 		TenantPrincipal p=TenantContext.require();if(p.isGuest()||!(p.hasRole("OWNER")||p.hasRole("MANAGER")||p.hasRole("SHIFT_MANAGER")||p.hasRole("CASHIER")))throw ApiException.forbidden("ORDER_CLOSE","You do not have permission to close paid orders");
 		OrderEntity o=requireOwn(orderId);if(!outletId.equals(o.getOutletId()))throw ApiException.bad("ORDER_OUTLET","Order does not belong to this outlet");
 		if(OrderStatus.COMPLETED.equals(o.getStatus()))return toView(o);if(!OrderStatus.PAID.equals(o.getStatus()))throw ApiException.conflict("ORDER_NOT_PAID","Complete payment before closing this order");
-		var invoice=billing.byOrder(orderId);long paid=payments.findByInvoiceId(invoice.getId()).stream().filter(x->"SUCCESS".equals(x.getStatus())).mapToLong(PaymentEntity::getAmountPaise).sum();if(paid<invoice.getTotalPaise())throw ApiException.conflict("PAYMENT_INCOMPLETE","The invoice still has an outstanding balance");
+		var invoice=billing.byOrder(orderId);long paid=payments.successfulAmount(invoice.getId());if(paid<invoice.getTotalPaise())throw ApiException.conflict("PAYMENT_INCOMPLETE","The invoice still has an outstanding balance");
 		if(lines.findByOrderId(orderId).stream().anyMatch(line->!List.of("SERVED","CANCELLED").contains(line.getFulfilmentStatus())))throw ApiException.conflict("SERVICE_INCOMPLETE","Serve or cancel every item before closing the order");
 		if(kots.findByOrderId(orderId).stream().anyMatch(kot->!List.of("SERVED","CANCELLED").contains(kot.getStatus())))throw ApiException.conflict("KITCHEN_INCOMPLETE","Kitchen or service work is still active");
 		completePaidOrder(o);return toView(o);
@@ -334,12 +343,19 @@ public class OrderService {
 	}
 
 	private void completePaidOrder(OrderEntity o) {
-		OrderStatus.assertTransition(o.getStatus(),OrderStatus.COMPLETED);o.setStatus(OrderStatus.COMPLETED);orders.save(o);if(o.getTableId()!=null)floor.markPaidDirty(o.getTableId());audit.write("ORDER_CLOSED","ORDER",o.getId(),"table="+o.getTableId());outbox.publish(o.getTenantId(),"OrderClosed","{\"orderId\":\""+o.getId()+"\",\"outletId\":\""+o.getOutletId()+"\",\"tableId\":\""+o.getTableId()+"\"}");events.publishEvent(new OrderClosed(o.getTenantId(),o.getOutletId(),o.getId(),o.getTableId()));
+		String stockPolicy=configuration.settings(o.getOutletId()).negativeStockPolicy();
+		boolean allowNegative=floor.outlet(o.getOutletId()).isAllowNegativeStock()&&!"BLOCK".equals(stockPolicy);
+		List<RecipeConsumption> consumption=lines.findByOrderId(o.getId()).stream()
+				.filter(line->line.getRecipeVersionId()!=null)
+				.map(line->new RecipeConsumption(line.getRecipeVersionId(),line.getQty())).toList();
+		inventory.consumeCompletedOrder(o.getOutletId(),o.getId(),consumption,allowNegative);
+		OrderStatus.assertTransition(o.getStatus(),OrderStatus.COMPLETED);o.setStatus(OrderStatus.COMPLETED);orders.save(o);if(o.getTableId()!=null)floor.releaseAfterPayment(o.getTableId());audit.write("ORDER_CLOSED","ORDER",o.getId(),"table="+o.getTableId());outbox.publish(o.getTenantId(),"OrderClosed","{\"orderId\":\""+o.getId()+"\",\"outletId\":\""+o.getOutletId()+"\",\"tableId\":\""+o.getTableId()+"\"}");events.publishEvent(new OrderClosed(o.getTenantId(),o.getOutletId(),o.getId(),o.getTableId()));
 	}
 
 	private Map<String, Object> addRoundInternal(OrderEntity suppliedOrder, UUID outletId, UUID tableId, String channel, List<Map<String, Object>> items,
 			boolean autoConfirm) {
 		TenantPrincipal p = TenantContext.require();
+		subscriptions.assertNewWorkAllowed(p.tenantId());
 		if (items == null || items.isEmpty()) throw ApiException.bad("EMPTY_ORDER", "Add at least one item");
 		if (items.size() > 100) throw ApiException.bad("TOO_MANY_ITEMS", "An order round can contain at most 100 items");
 		var table = tableId == null ? null : floor.lockForOrder(tableId);
@@ -352,7 +368,7 @@ public class OrderService {
 				throw ApiException.conflict("TABLE_UNAVAILABLE", "This table is not available for a new order");
 			o = newOrder(p, outletId, tableId, channel,
 					tableId == null ? OrderType.TAKEAWAY : OrderType.DINE_IN, OrderEntryMode.DIRECT_POS);
-			orders.save(o);
+			o = orders.saveAndFlush(o);
 			if (tableId != null && p.userId() != null) {
 				events.publishEvent(new com.restaurant.platform.api.DineInOrderOpened(p.tenantId(), outletId, tableId, o.getId(), p.userId()));
 			}
@@ -469,12 +485,6 @@ public class OrderService {
 		if (OrderStatus.DRAFT.equals(o.getStatus())) {
 			OrderStatus.assertTransition(o.getStatus(), OrderStatus.CONFIRMED);
 			o.setStatus(OrderStatus.CONFIRMED);
-		}
-		String stockPolicy = configuration.settings(o.getOutletId()).negativeStockPolicy();
-		boolean allowNeg = outlet.isAllowNegativeStock() && !"BLOCK".equals(stockPolicy);
-		for (OrderLineEntity line : lines.findByOrderId(o.getId())) {
-			if (!line.getRoundId().equals(round.getId())) continue;
-			inventory.deductSale(o.getOutletId(), o.getId(), line.getRecipeVersionId(), line.getQty(), allowNeg);
 		}
 		if (OrderStatus.CONFIRMED.equals(o.getStatus())) {
 			OrderStatus.assertTransition(o.getStatus(), OrderStatus.KOT_SENT);

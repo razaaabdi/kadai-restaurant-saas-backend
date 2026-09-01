@@ -28,7 +28,7 @@ public class OrderLineEntity {
 	private Instant pickedUpAt;
 	private UUID servedBy;
 	private Instant servedAt;
-	@Version private long version;
+	@Version private Long version;
 	public UUID getId() { return id; }
 	public UUID getOrderId() { return orderId; }
 	public UUID getRoundId() { return roundId; }
@@ -44,7 +44,7 @@ public class OrderLineEntity {
 	public Instant getPickedUpAt() { return pickedUpAt; }
 	public UUID getServedBy() { return servedBy; }
 	public Instant getServedAt() { return servedAt; }
-	public long getVersion() { return version; }
+	public long getVersion() { return version == null ? 0 : version; }
 	public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
 	public void setOrderId(UUID orderId) { this.orderId = orderId; }
 	public void setRoundId(UUID roundId) { this.roundId = roundId; }

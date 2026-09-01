@@ -30,6 +30,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -54,10 +55,11 @@ public class InventoryFacade {
 	private final StockLedgerService ledger;
 	private final AuditWriter audit;
 	private final OutboxPublisher outbox;
+	private final JdbcTemplate jdbc;
 
 	public InventoryFacade(InventoryItemRepository items, RecipeVersionRepository recipes, RecipeLineRepository lines,
 			StockTransactionRepository txs, StockBalanceRepository balances, InventoryCategoryRepository categories,
-			StockLocationRepository locations, StockLedgerService ledger, AuditWriter audit, OutboxPublisher outbox) {
+			StockLocationRepository locations, StockLedgerService ledger, AuditWriter audit, OutboxPublisher outbox, JdbcTemplate jdbc) {
 		this.items = items;
 		this.recipes = recipes;
 		this.lines = lines;
@@ -68,6 +70,7 @@ public class InventoryFacade {
 		this.ledger = ledger;
 		this.audit = audit;
 		this.outbox = outbox;
+		this.jdbc = jdbc;
 	}
 
 	@Transactional
@@ -376,18 +379,25 @@ public class InventoryFacade {
 
 	@Transactional
 	public Map<String, Object> createRecipe(UUID variantId, UUID inventoryItemId, String qty) {
+		return createRecipe(variantId,List.of(Map.of("inventoryItemId",inventoryItemId,"qty",qty)));
+	}
+
+	@Transactional
+	public Map<String,Object> createRecipe(UUID variantId,List<Map<String,Object>> ingredients) {
+		requireStaff();
+		if(variantId==null)throw ApiException.bad("VARIANT","Variant is required");
+		if(ingredients==null||ingredients.isEmpty())throw ApiException.bad("RECIPE_LINES","Add at least one ingredient");
+		if(ingredients.size()>100)throw ApiException.bad("RECIPE_LINES","A recipe can contain at most 100 ingredients");
 		RecipeVersionEntity v = new RecipeVersionEntity();
 		v.setTenantId(TenantContext.require().tenantId());
 		v.setVariantId(variantId);
-		v.setVersionNo(recipes.findByVariantId(variantId).size() + 1);
+		int versionNo=recipes.findByVariantId(variantId).size()+1;
+		v.setVersionNo(versionNo);
 		recipes.save(v);
-		RecipeLineEntity l = new RecipeLineEntity();
-		l.setTenantId(TenantContext.require().tenantId());
-		l.setRecipeVersionId(v.getId());
-		l.setInventoryItemId(inventoryItemId);
-		l.setQty(new Quantity(new BigDecimal(qty)).value());
-		lines.save(l);
-		return Map.of("recipeVersionId", v.getId());
+		java.util.Set<UUID> seen=new java.util.HashSet<>();
+		for(Map<String,Object> ingredient:ingredients){UUID inventoryItemId;try{inventoryItemId=UUID.fromString(String.valueOf(ingredient.get("inventoryItemId")));}catch(Exception e){throw ApiException.bad("RECIPE_ITEM","Each ingredient requires a valid inventoryItemId");}if(!seen.add(inventoryItemId))throw ApiException.bad("RECIPE_DUPLICATE","An ingredient can appear only once per recipe version");InventoryItemEntity item=requireItem(inventoryItemId);requireOutletAccess(item.getOutletId());BigDecimal quantity;try{quantity=new Quantity(new BigDecimal(String.valueOf(ingredient.get("qty")))).value();}catch(Exception e){throw ApiException.bad("RECIPE_QUANTITY","Each ingredient requires a valid quantity");}if(quantity.compareTo(BigDecimal.ZERO)<=0)throw ApiException.bad("RECIPE_QUANTITY","Ingredient quantity must be greater than zero");RecipeLineEntity l=new RecipeLineEntity();l.setTenantId(TenantContext.require().tenantId());l.setRecipeVersionId(v.getId());l.setInventoryItemId(inventoryItemId);l.setQty(quantity);lines.save(l);}
+		audit.write("RECIPE_VERSION_CREATED","RECIPE_VERSION",v.getId(),"variant="+variantId+" ingredients="+ingredients.size());
+		return Map.of("recipeVersionId",v.getId(),"versionNo",versionNo,"ingredientCount",ingredients.size());
 	}
 
 	@Transactional
@@ -412,6 +422,9 @@ public class InventoryFacade {
 					"ORDER", null, null, allowNegative);
 		}
 	}
+
+	@Transactional
+	public boolean consumeCompletedOrder(UUID outletId,UUID orderId,List<RecipeConsumption> consumptions,boolean allowNegative){var p=TenantContext.require();int inserted=jdbc.update("insert into inventory_order_consumptions(order_id,tenant_id,outlet_id) values(?,?,?) on conflict(order_id) do nothing",orderId,p.tenantId(),outletId);if(inserted==0)return false;for(RecipeConsumption consumption:consumptions)deductSale(outletId,orderId,consumption.recipeVersionId(),consumption.portions(),allowNegative);audit.write("ORDER_INVENTORY_CONSUMED","ORDER",orderId,"recipeLines="+consumptions.size());return true;}
 
 	@Transactional
 	public void reverseVoid(UUID outletId, UUID orderId) {

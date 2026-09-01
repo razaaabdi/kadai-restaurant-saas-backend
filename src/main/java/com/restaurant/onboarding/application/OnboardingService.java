@@ -8,6 +8,7 @@ import com.restaurant.platform.api.TenantContext;
 import com.restaurant.platform.api.TenantPrincipal;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.util.List;
 import java.util.Map;
@@ -19,15 +20,19 @@ public class OnboardingService {
 	private final OrganizationFacade org;
 	private final OutletFacade outlets;
 	private final IdentityFacade identity;
+	private final boolean legacyEnabled;
 
-	public OnboardingService(OrganizationFacade org, OutletFacade outlets, IdentityFacade identity) {
+	public OnboardingService(OrganizationFacade org, OutletFacade outlets, IdentityFacade identity,
+			@Value("${app.legacy-onboarding-enabled:false}") boolean legacyEnabled) {
 		this.org = org;
 		this.outlets = outlets;
 		this.identity = identity;
+		this.legacyEnabled = legacyEnabled;
 	}
 
 	@Transactional
 	public Map<String, Object> onboard(String restaurantName, String slug, String ownerEmail, String ownerPassword, String ownerName) {
+		if (!legacyEnabled) throw ApiException.forbidden("PLATFORM_PROVISIONING_REQUIRED", "Restaurants must be provisioned by a platform administrator");
 		TenantContext.bootstrap(true);
 		String finalSlug = slug.toLowerCase().replaceAll("[^a-z0-9-]", "-");
 		if (org.slugTaken(finalSlug)) {

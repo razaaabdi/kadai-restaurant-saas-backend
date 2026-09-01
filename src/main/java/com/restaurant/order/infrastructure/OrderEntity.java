@@ -36,7 +36,7 @@ public class OrderEntity {
 	private LocalDate businessDate;
 	private UUID createdBy;
 	private Instant createdAt = Instant.now();
-	@Version private long version;
+	@Version private Long version;
 
 	public UUID getId() { return id; }
 	public UUID getTenantId() { return tenantId; }
@@ -84,5 +84,5 @@ public class OrderEntity {
 	public void setBusinessDate(LocalDate businessDate) { this.businessDate = businessDate; }
 	public UUID getCreatedBy() { return createdBy; }
 	public void setCreatedBy(UUID createdBy) { this.createdBy = createdBy; }
-	public long getVersion() { return version; }
+	public long getVersion() { return version == null ? 0 : version; }
 }

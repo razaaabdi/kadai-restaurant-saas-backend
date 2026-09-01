@@ -14,8 +14,10 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -24,26 +26,35 @@ public class KitchenService {
 	private final KotSeqRepository seqs;
 	private final ApplicationEventPublisher events;
 	private final JdbcTemplate jdbc;
+	private final KotPrintService prints;
 
-	public KitchenService(KotRepository kots, KotSeqRepository seqs, ApplicationEventPublisher events, JdbcTemplate jdbc) {
+	public KitchenService(KotRepository kots, KotSeqRepository seqs, ApplicationEventPublisher events,
+			JdbcTemplate jdbc, KotPrintService prints) {
 		this.kots = kots;
 		this.seqs = seqs;
 		this.events = events;
 		this.jdbc = jdbc;
+		this.prints = prints;
 	}
 
 	@Transactional
 	public void accept(UUID kotId) {
 		KotEntity k = requireKot(kotId);
-		if ("ACCEPTED".equals(k.getStatus())) return;
-		if (!"NEW".equals(k.getStatus())) throw ApiException.conflict("KOT_TRANSITION", "Only a new KOT can be accepted");
-		k.setStatus("ACCEPTED"); kots.save(k);
-		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(), k.getRoundId(), "ACCEPTED"));
+		if ("ACCEPTED".equals(k.getStatus()))
+			return;
+		if (!"NEW".equals(k.getStatus()))
+			throw ApiException.conflict("KOT_TRANSITION", "Only a new KOT can be accepted");
+		k.setStatus("ACCEPTED");
+		kots.save(k);
+		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(),
+				k.getRoundId(), "ACCEPTED"));
 	}
 
 	@EventListener
 	@Transactional
 	public void onRound(RoundConfirmed ev) {
+		if (kots.findByRoundId(ev.roundId()).isPresent())
+			return;
 		KotSeqId sid = new KotSeqId(ev.tenantId(), ev.outletId());
 		KotSeqEntity seq = seqs.findById(sid).orElseGet(() -> {
 			KotSeqEntity n = new KotSeqEntity();
@@ -60,44 +71,79 @@ public class KitchenService {
 		k.setOrderId(ev.orderId());
 		k.setRoundId(ev.roundId());
 		k.setKotNumber(seq.getLastNumber());
-		kots.save(k);
+		try {
+			kots.saveAndFlush(k);
+			prints.queueInitial(ev.tenantId(), ev.outletId(), k.getId());
+		} catch (DataIntegrityViolationException ignored) {
+			/* another delivery created this round's KOT */}
 	}
 
 	@Transactional
 	public void startPrep(UUID kotId) {
 		KotEntity k = requireKot(kotId);
-		if ("PREPARING".equals(k.getStatus())) return;
-		if (!("NEW".equals(k.getStatus()) || "ACCEPTED".equals(k.getStatus()))) throw ApiException.conflict("KOT_TRANSITION", "This KOT cannot start preparation");
+		if ("PREPARING".equals(k.getStatus()))
+			return;
+		if (!("NEW".equals(k.getStatus()) || "ACCEPTED".equals(k.getStatus())))
+			throw ApiException.conflict("KOT_TRANSITION", "This KOT cannot start preparation");
 		k.setStatus("PREPARING");
 		kots.save(k);
-		jdbc.update("update order_lines set fulfilment_status='PREPARING', version=version+1 where round_id=? and fulfilment_status in ('SENT_TO_KITCHEN','ACCEPTED')", k.getRoundId());
-		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(), k.getRoundId(), "PREPARING"));
+		jdbc.update(
+				"update order_lines set fulfilment_status='PREPARING', version=version+1 where round_id=? and fulfilment_status in ('SENT_TO_KITCHEN','ACCEPTED')",
+				k.getRoundId());
+		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(),
+				k.getRoundId(), "PREPARING"));
 	}
 
 	@Transactional
 	public void markReady(UUID kotId) {
 		KotEntity k = requireKot(kotId);
-		if ("READY".equals(k.getStatus())) return;
-		if (!("PREPARING".equals(k.getStatus()) || "PARTIALLY_READY".equals(k.getStatus()))) throw ApiException.conflict("KOT_TRANSITION", "Only a preparing KOT can be marked ready");
+		if ("READY".equals(k.getStatus()))
+			return;
+		if (!("PREPARING".equals(k.getStatus()) || "PARTIALLY_READY".equals(k.getStatus())))
+			throw ApiException.conflict("KOT_TRANSITION", "Only a preparing KOT can be marked ready");
 		k.setStatus("READY");
 		kots.save(k);
-		jdbc.update("update order_lines set fulfilment_status='READY_FOR_PICKUP', version=version+1 where round_id=? and fulfilment_status in ('SENT_TO_KITCHEN','ACCEPTED','PREPARING')", k.getRoundId());
-		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(), k.getRoundId(), "READY"));
+		jdbc.update(
+				"update order_lines set fulfilment_status='READY_FOR_PICKUP', version=version+1 where round_id=? and fulfilment_status in ('SENT_TO_KITCHEN','ACCEPTED','PREPARING')",
+				k.getRoundId());
+		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(),
+				k.getRoundId(), "READY"));
 	}
 
 	@Transactional
 	public void markItemReady(UUID kotId, UUID itemId) {
 		KotEntity k = requireKot(kotId);
-		int changed = jdbc.update("update order_lines set fulfilment_status='READY_FOR_PICKUP', version=version+1 where id=? and round_id=? and fulfilment_status='PREPARING'", itemId, k.getRoundId());
-		if (changed == 0) throw ApiException.conflict("ITEM_TRANSITION", "Only a preparing item can be marked ready");
-		Integer remaining = jdbc.queryForObject("select count(*) from order_lines where round_id=? and fulfilment_status not in ('READY_FOR_PICKUP','PICKED_UP','SERVED','CANCELLED')", Integer.class, k.getRoundId());
-		k.setStatus(remaining != null && remaining == 0 ? "READY" : "PARTIALLY_READY"); kots.save(k);
-		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(), k.getRoundId(), k.getStatus()));
+		int changed = jdbc.update(
+				"update order_lines set fulfilment_status='READY_FOR_PICKUP', version=version+1 where id=? and round_id=? and fulfilment_status='PREPARING'",
+				itemId, k.getRoundId());
+		if (changed == 0)
+			throw ApiException.conflict("ITEM_TRANSITION", "Only a preparing item can be marked ready");
+		Integer remaining = jdbc.queryForObject(
+				"select count(*) from order_lines where round_id=? and fulfilment_status not in ('READY_FOR_PICKUP','PICKED_UP','SERVED','CANCELLED')",
+				Integer.class, k.getRoundId());
+		k.setStatus(remaining != null && remaining == 0 ? "READY" : "PARTIALLY_READY");
+		kots.save(k);
+		events.publishEvent(new KotStatusChanged(TenantContext.require().tenantId(), k.getOrderId(), k.getId(),
+				k.getRoundId(), k.getStatus()));
 	}
 
-	private KotEntity requireKot(UUID id) { return kots.findById(id).orElseThrow(() -> ApiException.notFound("KOT", "KOT not found")); }
+	private KotEntity requireKot(UUID id) {
+		return kots.findById(id).orElseThrow(() -> ApiException.notFound("KOT", "KOT not found"));
+	}
 
 	public List<KotEntity> byOrder(UUID orderId) {
 		return kots.findByOrderId(orderId);
+	}
+
+	public Map<String, Object> printStatus(UUID kotId) {
+		return prints.status(kotId);
+	}
+
+	public Map<String, Object> reprint(UUID kotId, String reason) {
+		return prints.reprint(kotId, reason);
+	}
+
+	public Map<String, Object> retryPrint(UUID kotId) {
+		return prints.retry(kotId);
 	}
 }

@@ -19,7 +19,7 @@ public class TableEntity {
 	private String status = "FREE";
 	private boolean qrLocked;
 	private boolean deleted;
-	@Version private long version;
+	@Version private Long version;
 
 	public UUID getId() { return id; }
 	public UUID getTenantId() { return tenantId; }
@@ -36,7 +36,7 @@ public class TableEntity {
 	public void setStatus(String status) { this.status = status; }
 	public boolean isQrLocked() { return qrLocked; }
 	public void setQrLocked(boolean qrLocked) { this.qrLocked = qrLocked; }
-	public long getVersion() { return version; }
+	public long getVersion() { return version == null ? 0 : version; }
 	public boolean isDeleted() { return deleted; }
 	public void setDeleted(boolean deleted) { this.deleted = deleted; }
 }

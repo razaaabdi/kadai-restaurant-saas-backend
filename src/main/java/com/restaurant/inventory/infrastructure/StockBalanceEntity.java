@@ -20,7 +20,7 @@ public class StockBalanceEntity {
 	private BigDecimal qty = BigDecimal.ZERO;
 	private long averageCostPaise;
 	private long inventoryValuePaise;
-	@Version private long version;
+	@Version private Long version;
 	private Instant updatedAt = Instant.now();
 
 	public UUID getId() { return id; }
@@ -30,7 +30,7 @@ public class StockBalanceEntity {
 	public BigDecimal getQty() { return qty; }
 	public long getAverageCostPaise() { return averageCostPaise; }
 	public long getInventoryValuePaise() { return inventoryValuePaise; }
-	public long getVersion() { return version; }
+	public long getVersion() { return version == null ? 0 : version; }
 	public Instant getUpdatedAt() { return updatedAt; }
 	public void setQty(BigDecimal qty) { this.qty = qty; }
 	public void setAverageCostPaise(long averageCostPaise) { this.averageCostPaise = averageCostPaise; }

@@ -9,8 +9,7 @@ import com.restaurant.order.infrastructure.OrderEntity;
 import com.restaurant.order.infrastructure.OrderLineEntity;
 import com.restaurant.order.infrastructure.OrderLineRepository;
 import com.restaurant.order.infrastructure.OrderRepository;
-import com.restaurant.payment.infrastructure.PaymentEntity;
-import com.restaurant.payment.infrastructure.PaymentRepository;
+import com.restaurant.payment.api.PaymentFacade;
 import com.restaurant.outlet.infrastructure.DiningTableRepository;
 import com.restaurant.outlet.infrastructure.TableEntity;
 import com.restaurant.platform.api.ApiException;
@@ -43,11 +42,11 @@ public class WaiterOperationsService {
 	private final AuditWriter audit;
 	private final OrderService orderService;
 	private final JdbcTemplate jdbc;
-	private final PaymentRepository payments;
+	private final PaymentFacade payments;
 
 	public WaiterOperationsService(OrderRepository orders, OrderLineRepository lines, KotRepository kots,
 			DiningTableRepository tables, InvoiceRepository invoices, WaiterNotificationRepository notifications,
-			AuditWriter audit, OrderService orderService, JdbcTemplate jdbc,PaymentRepository payments) {
+			AuditWriter audit, OrderService orderService, JdbcTemplate jdbc,PaymentFacade payments) {
 		this.orders = orders; this.lines = lines; this.kots = kots; this.tables = tables; this.invoices = invoices;
 		this.notifications = notifications; this.audit = audit; this.orderService = orderService; this.jdbc = jdbc;this.payments=payments;
 	}
@@ -266,7 +265,7 @@ public class WaiterOperationsService {
 		view.put("kitchenProgress", service);
 		view.put("serviceStatus", service);
 		String invoiceStatus = rs.getString("invoice_status");
-		view.put("invoiceStatus", !hasInvoice ? "NOT_GENERATED" : "VOID".equals(invoiceStatus) ? "VOID" : "GENERATED");
+		view.put("invoiceStatus", !hasInvoice ? "NOT_GENERATED" : invoiceStatus);
 		view.put("paymentStatus", !hasInvoice ? "NOT_STARTED" : due == 0 ? "PAID" : paid > 0 ? "PARTIALLY_PAID" : "AWAITING_PAYMENT");
 		view.put("subtotalPaise", hasInvoice ? rs.getLong("invoice_subtotal") : rs.getLong("order_subtotal"));
 		view.put("taxPaise", hasInvoice ? rs.getLong("invoice_tax") : rs.getLong("order_tax"));
@@ -301,10 +300,10 @@ public class WaiterOperationsService {
 		view.put("assignedWaiterName",validWaiter==null?null:waiterName(validWaiter));
 		view.put("itemCount", orderLines.stream().mapToInt(line -> line.getQty().intValue()).sum()); view.put("kotCount", orderKots.size());
 		view.put("readyCount", count(orderLines, "READY_FOR_PICKUP")); view.put("pickedUpCount", count(orderLines, "PICKED_UP")); view.put("servedCount", count(orderLines, "SERVED"));
-		String service=aggregate(orderLines);view.put("kitchenProgress",service);view.put("serviceStatus",service);InvoiceEntity invoice = invoices.findByOrderId(order.getId()).orElse(null);
-		long paid=invoice==null?0:payments.findByInvoiceId(invoice.getId()).stream().filter(p->"SUCCESS".equals(p.getStatus())).mapToLong(PaymentEntity::getAmountPaise).sum();
+		String service=aggregate(orderLines);view.put("kitchenProgress",service);view.put("serviceStatus",service);InvoiceEntity invoice = invoices.findFirstByOrderIdOrderByCreatedAtDesc(order.getId()).orElse(null);
+		long paid=invoice==null?0:payments.successfulAmount(invoice.getId());
 		long total=invoice==null?order.getSubtotalPaise():invoice.getTotalPaise();long due=Math.max(0,total-paid);
-		view.put("invoiceStatus",invoice==null?"NOT_GENERATED":"VOID".equals(invoice.getStatus())?"VOID":"GENERATED");
+		view.put("invoiceStatus",invoice==null?"NOT_GENERATED":invoice.getStatus());
 		view.put("paymentStatus",invoice==null?"NOT_STARTED":due==0?"PAID":paid>0?"PARTIALLY_PAID":"AWAITING_PAYMENT");
 		view.put("subtotalPaise",invoice==null?order.getSubtotalPaise():invoice.getSubtotalPaise());view.put("taxPaise",invoice==null?order.getTaxPaise():invoice.getTaxPaise());view.put("discountPaise",invoice==null?order.getDiscountPaise():invoice.getDiscountPaise());view.put("serviceChargePaise",invoice==null?order.getServiceChargePaise():invoice.getServiceChargePaise());view.put("roundingAdjustmentPaise",invoice==null?0:invoice.getRoundingPaise());view.put("totalPaise",total);view.put("paidPaise",paid);view.put("amountDuePaise",due);view.put("runningAmountPaise",total);return view;
 	}

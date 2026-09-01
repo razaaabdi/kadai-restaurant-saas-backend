@@ -109,9 +109,10 @@ public class InventoryController {
 	}
 
 	@PostMapping("/recipes")
-	public Map<String, Object> recipe(@RequestBody Map<String, String> body) {
-		return inventory.createRecipe(UUID.fromString(body.get("variantId")), UUID.fromString(body.get("inventoryItemId")),
-				body.get("qty"));
+	public Map<String, Object> recipe(@RequestBody Map<String, Object> body) {
+		UUID variantId=uuid(body.get("variantId"));
+		if(body.get("ingredients") instanceof List<?> raw){List<Map<String,Object>> ingredients=new java.util.ArrayList<>();for(Object value:raw){if(!(value instanceof Map<?,?> source))throw com.restaurant.platform.api.ApiException.bad("RECIPE_LINES","ingredients must contain objects");Map<String,Object> line=new java.util.HashMap<>();source.forEach((k,v)->line.put(String.valueOf(k),v));ingredients.add(line);}return inventory.createRecipe(variantId,ingredients);}
+		return inventory.createRecipe(variantId,uuid(body.get("inventoryItemId")),str(body.get("qty")));
 	}
 
 	@PostMapping("/stock/purchase")

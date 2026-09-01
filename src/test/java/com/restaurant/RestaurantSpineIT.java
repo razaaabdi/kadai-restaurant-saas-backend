@@ -41,6 +41,10 @@ class RestaurantSpineIT extends AbstractIT {
 				{"name":"Batter","unit":"g"}
 				""");
 		String invId = Http.uuid(invItem, "id");
+		var oilItem = api.post("/api/v1/outlets/" + outletA + "/inventory-items", """
+				{"name":"Oil","unit":"ml"}
+				""");
+		String oilId = Http.uuid(oilItem,"id");
 		var invUpdated = api.putRaw("/api/v1/inventory-items/" + invId, """
 				{"name":"Dosa Batter","unit":"kg"}
 				""", 0);
@@ -52,11 +56,14 @@ class RestaurantSpineIT extends AbstractIT {
 				{"name":"Missing","unit":"g"}
 				""", 0).getStatusCode().value()).isEqualTo(404);
 		api.post("/api/v1/recipes",
-				"{\"variantId\":\"" + variantId + "\",\"inventoryItemId\":\"" + invId + "\",\"qty\":\"100.0000\"}",
+				"{\"variantId\":\"" + variantId + "\",\"ingredients\":[{\"inventoryItemId\":\"" + invId + "\",\"qty\":\"100.0000\"},{\"inventoryItemId\":\""+oilId+"\",\"qty\":\"10.0000\"}]}",
 				UUID.randomUUID().toString());
 		api.post("/api/v1/stock/purchase",
 				"{\"outletId\":\"" + outletA + "\",\"inventoryItemId\":\"" + invId + "\",\"qty\":\"1000.0000\"}",
 				"purch-1");
+		api.post("/api/v1/stock/purchase",
+				"{\"outletId\":\"" + outletA + "\",\"inventoryItemId\":\"" + oilId + "\",\"qty\":\"100.0000\"}",
+				"purch-oil-1");
 
 		var area = api.post("/api/v1/outlets/" + outletA + "/areas", """
 				{"name":"Hall"}
@@ -80,6 +87,10 @@ class RestaurantSpineIT extends AbstractIT {
 
 		var kots1 = api.get("/api/v1/orders/" + orderId + "/kots");
 		assertThat((List<?>) kots1.get("list")).hasSize(1);
+		@SuppressWarnings("unchecked") Map<String,Object> firstKot=(Map<String,Object>)((List<?>)kots1.get("list")).getFirst();
+		assertThat(((Map<?,?>)firstKot.get("print")).get("latest")).isInstanceOf(Map.class);
+		var reprint=api.post("/api/v1/kots/"+firstKot.get("id")+"/reprint", "{\"reason\":\"Kitchen copy damaged\"}");
+		assertThat(reprint.get("status")).isEqualTo("FAILED");
 
 		Http guest2 = new Http("http://localhost:" + port);
 		var sess2 = guest2.post("/api/v1/public/qr/" + qr + "/sessions", "{}", "sess-2");
@@ -94,11 +105,22 @@ class RestaurantSpineIT extends AbstractIT {
 		var bill = guest1.post("/api/v1/public/qr/" + qr + "/request-bill", "{}", "bill-1");
 		String invoiceId = Http.uuid(bill, "invoiceId");
 		assertThat(bill.get("status")).isEqualTo("BILLED");
+		var invoiceDetail = api.get("/api/v1/invoices/" + invoiceId);
+		assertThat(((Map<?, ?>) invoiceDetail.get("invoice")).get("invoiceNumber").toString()).startsWith("INV-");
+		assertThat((List<?>) invoiceDetail.get("lines")).hasSize(2);
+		var invoiceSearch = api.get("/api/v1/outlets/" + outletA + "/invoices?q="
+				+ ((Map<?, ?>) invoiceDetail.get("invoice")).get("invoiceNumber"));
+		assertThat((List<?>) invoiceSearch.get("content")).hasSize(1);
 
 		var pay1 = api.post("/api/v1/payments",
 				"{\"invoiceId\":\"" + invoiceId + "\",\"method\":\"UPI\",\"amountPaise\":" + bill.get("invoiceTotalPaise") + "}",
 				"pay-1");
 		assertThat(pay1.get("invoicePaid")).isEqualTo(true);
+		assertThat((List<?>) api.get("/api/v1/invoices/" + invoiceId).get("payments")).hasSize(1);
+		assertThat(api.get("/api/v1/orders/" + orderId).get("status")).isIn("PAID", "COMPLETED");
+		var invalidPayment = api.postRaw("/api/v1/payments",
+				"{\"invoiceId\":\"" + invoiceId + "\",\"method\":\"BITCOIN\",\"amountPaise\":1}", "invalid-method");
+		assertThat(invalidPayment.getStatusCode().value()).isEqualTo(400);
 		var payReplay = api.postRaw("/api/v1/payments",
 				"{\"invoiceId\":\"" + invoiceId + "\",\"method\":\"UPI\",\"amountPaise\":" + bill.get("invoiceTotalPaise") + "}",
 				"pay-1");
@@ -107,9 +129,18 @@ class RestaurantSpineIT extends AbstractIT {
 		api.post("/api/v1/outbox/drain", "{}");
 		var sales = api.get("/api/v1/outlets/" + outletA + "/daily-sales?date=" + java.time.LocalDate.now(java.time.ZoneOffset.UTC));
 		assertThat(((Number) sales.get("ordersCount")).intValue()).isGreaterThanOrEqualTo(1);
+		String dashboardDate = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString();
+		var dashboardSummary = api.get("/api/v1/outlets/" + outletA + "/dashboard/summary?from=" + dashboardDate + "&to=" + dashboardDate);
+		assertThat(((Map<?, ?>) dashboardSummary.get("sales")).get("value")).isEqualTo(bill.get("invoiceTotalPaise"));
+		assertThat(((Number) ((Map<?, ?>) dashboardSummary.get("orders")).get("value")).longValue()).isGreaterThanOrEqualTo(1);
+		assertThat(dashboardSummary.get("userName")).isEqualTo("A");
+		assertThat((List<?>) api.get("/api/v1/outlets/" + outletA + "/dashboard/overview?from=" + dashboardDate + "&to=" + dashboardDate).get("points")).isNotEmpty();
+		assertThat(api.get("/api/v1/outlets/" + outletA + "/dashboard/order-status?from=" + dashboardDate + "&to=" + dashboardDate).get("counts")).isInstanceOf(Map.class);
+		assertThat((List<?>) api.get("/api/v1/outlets/" + outletA + "/dashboard/recent-orders?from=" + dashboardDate + "&to=" + dashboardDate).get("list")).isNotEmpty();
+		assertThat((List<?>) api.get("/api/v1/outlets/" + outletA + "/dashboard/search?q=T1").get("list")).isNotEmpty();
 
 		var bal = api.get("/api/v1/stock/balance?outletId=" + outletA + "&inventoryItemId=" + invId);
-		assertThat(new java.math.BigDecimal(String.valueOf(bal.get("qty")))).isEqualByComparingTo("800.0000");
+		assertThat(new java.math.BigDecimal(String.valueOf(bal.get("qty")))).isEqualByComparingTo("1000.0000");
 
 		api.post("/api/v1/tables/" + tableId + "/clear-table", "{}");
 
@@ -135,6 +166,7 @@ class RestaurantSpineIT extends AbstractIT {
 		Http apiB = new Http("http://localhost:" + port).auth(Http.uuid(loginB, "accessToken"));
 		ResponseEntity<String> iso = apiB.getRaw("/api/v1/orders/" + orderId);
 		assertThat(iso.getStatusCode().value()).isIn(403, 404);
+		assertThat(apiB.getRaw("/api/v1/outlets/" + outletA + "/dashboard/summary?from=" + dashboardDate + "&to=" + dashboardDate).getStatusCode().value()).isEqualTo(403);
 
 		var rotated = api.post("/api/v1/tables/" + tableId + "/rotate-qr", "{}");
 		String newTok = Http.uuid(rotated, "token");
@@ -151,7 +183,9 @@ class RestaurantSpineIT extends AbstractIT {
 				"void-1");
 		api.post("/api/v1/orders/" + Http.uuid(voidOrder, "id") + "/cancel", "{}", "void-c");
 		var bal2 = api.get("/api/v1/stock/balance?outletId=" + outletA + "&inventoryItemId=" + invId);
-		assertThat(new java.math.BigDecimal(String.valueOf(bal2.get("qty")))).isEqualByComparingTo("700.0000");
+		assertThat(new java.math.BigDecimal(String.valueOf(bal2.get("qty")))).isEqualByComparingTo("900.0000");
+		var oilBalance = api.get("/api/v1/stock/balance?outletId=" + outletA + "&inventoryItemId=" + oilId);
+		assertThat(new java.math.BigDecimal(String.valueOf(oilBalance.get("qty")))).isEqualByComparingTo("90.0000");
 	}
 
 	private static String taxId(Map<String, Object> m, String k) {

@@ -21,6 +21,13 @@ class AccessManagementIT extends AbstractIT {
   api.post("/api/v1/users","{"+"\"name\":\"Manager\",\"email\":\"rbac-manager@test.com\",\"employeeCode\":\"MGR001\",\"password\":\"manager1234\",\"role\":\"MANAGER\",\"outletIds\":[\""+outlet+"\"]}");
   var managerLogin=new Http("http://localhost:"+port).post("/api/v1/auth/login","{\"email\":\"rbac-manager@test.com\",\"password\":\"manager1234\"}");
   Http manager=new Http("http://localhost:"+port).auth(Http.uuid(managerLogin,"accessToken"));
+  var managerPermissionChange=manager.putRaw("/api/v1/users/roles/CASHIER/permissions","{\"permissions\":[\"FLOOR_VIEW\"]}",0);
+  assertThat(managerPermissionChange.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+  var ownerPermissionChange=api.putRaw("/api/v1/users/roles/CASHIER/permissions","{\"permissions\":[\"FLOOR_VIEW\",\"ORDER_VIEW\"]}",0);
+  assertThat(ownerPermissionChange.getStatusCode()).isEqualTo(HttpStatus.OK);
+  assertThat(ownerPermissionChange.getBody()).contains("FLOOR_VIEW","ORDER_VIEW");
+  var ownerPermissionChangeRejected=api.putRaw("/api/v1/users/roles/OWNER/permissions","{\"permissions\":[\"FLOOR_VIEW\"]}",0);
+  assertThat(ownerPermissionChangeRejected.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
   var escalation=manager.postRaw("/api/v1/users","{"+"\"name\":\"Fake Owner\",\"email\":\"fake-owner@test.com\",\"employeeCode\":\"OWN002\",\"password\":\"ownerpass123\",\"role\":\"OWNER\",\"outletIds\":[\""+outlet+"\"]}",null);
   assertThat(escalation.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
   var cashier=manager.post("/api/v1/users","{"+"\"name\":\"Cashier\",\"email\":\"rbac-cashier@test.com\",\"employeeCode\":\"CSH001\",\"password\":\"cashier1234\",\"role\":\"CASHIER\",\"outletIds\":[\""+outlet+"\"]}");

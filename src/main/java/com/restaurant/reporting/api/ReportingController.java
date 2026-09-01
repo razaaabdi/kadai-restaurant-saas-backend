@@ -1,9 +1,7 @@
 package com.restaurant.reporting.api;
 
 import com.restaurant.reporting.application.OutboxPoller;
-import com.restaurant.reporting.infrastructure.DailySalesEntity;
-import com.restaurant.reporting.infrastructure.DailySalesId;
-import com.restaurant.reporting.infrastructure.DailySalesRepository;
+import com.restaurant.reporting.application.ReportingService;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
@@ -13,11 +11,11 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1")
 public class ReportingController {
-	private final DailySalesRepository sales;
+	private final ReportingService reporting;
 	private final OutboxPoller poller;
 
-	public ReportingController(DailySalesRepository sales, OutboxPoller poller) {
-		this.sales = sales;
+	public ReportingController(ReportingService reporting, OutboxPoller poller) {
+		this.reporting = reporting;
 		this.poller = poller;
 	}
 
@@ -29,10 +27,19 @@ public class ReportingController {
 
 	@GetMapping("/outlets/{outletId}/daily-sales")
 	public Map<String, Object> daily(@PathVariable UUID outletId, @RequestParam LocalDate date) {
-		var p = com.restaurant.platform.api.TenantContext.require();
-		DailySalesEntity row = sales.findById(new DailySalesId(p.tenantId(), outletId, date)).orElse(null);
-		if (row == null) return Map.of("ordersCount", 0, "gmvPaise", 0);
-		return Map.of("ordersCount", row.getOrdersCount(), "gmvPaise", row.getGmvPaise(),
-				"cashPaise", row.getCashPaise(), "upiPaise", row.getUpiPaise());
+		return reporting.daily(outletId, date);
 	}
+
+	@GetMapping("/outlets/{outletId}/dashboard")
+	public Map<String, Object> dashboard(@PathVariable UUID outletId, @RequestParam LocalDate date) { return reporting.dashboard(outletId, date); }
+	@GetMapping("/outlets/{outletId}/reports/sales")
+	public Map<String, Object> sales(@PathVariable UUID outletId, @RequestParam LocalDate from, @RequestParam LocalDate to) { return reporting.salesReport(outletId, from, to); }
+	@GetMapping("/outlets/{outletId}/reports/top-items")
+	public java.util.List<Map<String, Object>> topItems(@PathVariable UUID outletId, @RequestParam LocalDate from, @RequestParam LocalDate to) { return reporting.topItems(outletId, from, to); }
+	@GetMapping("/outlets/{outletId}/reports/payment-mix")
+	public java.util.List<Map<String, Object>> payments(@PathVariable UUID outletId, @RequestParam LocalDate from, @RequestParam LocalDate to) { return reporting.paymentMix(outletId, from, to); }
+	@GetMapping("/outlets/{outletId}/alerts")
+	public java.util.List<Map<String, Object>> alerts(@PathVariable UUID outletId) { return reporting.alerts(outletId); }
+	@GetMapping("/audit-log")
+	public java.util.List<Map<String, Object>> activity(@RequestParam(defaultValue = "30") int limit) { return reporting.activity(limit); }
 }

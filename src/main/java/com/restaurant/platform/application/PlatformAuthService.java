@@ -1,6 +1,6 @@
 package com.restaurant.platform.application;
 
-import com.restaurant.identity.application.JwtService;
+import com.restaurant.platform.api.PlatformTokenService;
 import com.restaurant.platform.api.ApiException;
 import com.restaurant.platform.api.AppProperties;
 import com.restaurant.platform.api.IdempotencyService;
@@ -15,8 +15,8 @@ import java.util.*;
 
 @Service
 public class PlatformAuthService {
- private final JdbcTemplate jdbc; private final PasswordEncoder encoder; private final JwtService jwt; private final AppProperties properties;
- public PlatformAuthService(JdbcTemplate j,PasswordEncoder e,JwtService jwt,AppProperties p){jdbc=j;encoder=e;this.jwt=jwt;properties=p;}
+ private final JdbcTemplate jdbc; private final PasswordEncoder encoder; private final PlatformTokenService jwt; private final AppProperties properties;
+ public PlatformAuthService(JdbcTemplate j,PasswordEncoder e,PlatformTokenService jwt,AppProperties p){jdbc=j;encoder=e;this.jwt=jwt;properties=p;}
  @Transactional public Map<String,Object> login(String username,String password){if(username==null||password==null)throw ApiException.unauthorized("Bad credentials");var a=jdbc.query("select id,email,password_hash,display_name,status from platform_administrators where lower(email)=?",(r,n)->new Admin(UUID.fromString(r.getString("id")),r.getString("email"),r.getString("password_hash"),r.getString("display_name"),r.getString("status")),username.trim().toLowerCase(Locale.ROOT));if(a.isEmpty()||a.getFirst().hash()==null||!encoder.matches(password,a.getFirst().hash()))throw ApiException.unauthorized("Bad credentials");if(!"ACTIVE".equals(a.getFirst().status()))throw ApiException.unauthorized("Account is not active");jdbc.update("update platform_administrators set last_login_at=now(),updated_at=now() where id=?",a.getFirst().id());return issue(a.getFirst());}
  @Transactional public Map<String,Object> refresh(String raw){if(raw==null)throw ApiException.unauthorized("Invalid refresh");var x=jdbc.query("select r.id,r.administrator_id,r.expires_at,r.revoked,a.email,a.password_hash,a.display_name,a.status from platform_refresh_tokens r join platform_administrators a on a.id=r.administrator_id where r.token_hash=? for update",(r,n)->new Refresh(UUID.fromString(r.getString("id")),new Admin(UUID.fromString(r.getString("administrator_id")),r.getString("email"),r.getString("password_hash"),r.getString("display_name"),r.getString("status")),r.getTimestamp("expires_at").toInstant(),r.getBoolean("revoked")),IdempotencyService.sha256(raw));if(x.isEmpty()||x.getFirst().revoked()||x.getFirst().expires().isBefore(Instant.now())||!"ACTIVE".equals(x.getFirst().admin().status()))throw ApiException.unauthorized("Invalid refresh");jdbc.update("update platform_refresh_tokens set revoked=true where id=?",x.getFirst().id());return issue(x.getFirst().admin());}
  @Transactional public void logout(String raw){if(raw!=null)jdbc.update("update platform_refresh_tokens set revoked=true where token_hash=?",IdempotencyService.sha256(raw));}

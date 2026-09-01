@@ -16,6 +16,7 @@ import com.restaurant.platform.api.AppProperties;
 import com.restaurant.platform.api.IdempotencyService;
 import com.restaurant.platform.api.TenantContext;
 import com.restaurant.platform.api.TenantPrincipal;
+import com.restaurant.platform.api.AuditWriter;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -41,10 +42,11 @@ public class FloorService {
 	private final AppProperties props;
 	private final StringRedisTemplate redis;
 	private final com.restaurant.identity.application.JwtService jwt;
+	private final AuditWriter audit;
 
 	public FloorService(AreaRepository areas, DiningTableRepository tables, QrTokenRepository qrTokens,
 			TableSessionRepository sessions, OutletRepository outlets, QrLookupDao lookup, AppProperties props,
-			StringRedisTemplate redis, com.restaurant.identity.application.JwtService jwt) {
+			StringRedisTemplate redis, com.restaurant.identity.application.JwtService jwt, AuditWriter audit) {
 		this.areas = areas;
 		this.tables = tables;
 		this.qrTokens = qrTokens;
@@ -53,6 +55,7 @@ public class FloorService {
 		this.lookup = lookup;
 		this.props = props;
 		this.redis = redis;
+		this.audit = audit;
 		this.jwt = jwt;
 	}
 
@@ -120,7 +123,7 @@ public class FloorService {
 		code = normalized(code, "Table name", 40); validateSeats(seats); status = status == null ? table.getStatus() : status; validateManualStatus(status);
 		if (!table.getCode().equalsIgnoreCase(code) && tables.existsByOutletIdAndCodeIgnoreCaseAndDeletedFalse(table.getOutletId(), code))
 			throw ApiException.conflict("TABLE_CODE_EXISTS", "A table with this name already exists");
-		if (List.of("OCCUPIED", "BILL_REQUESTED").contains(table.getStatus()) && !table.getStatus().equals(status))
+		if (!table.getStatus().equals(status) && (List.of("OCCUPIED", "BILL_REQUESTED").contains(table.getStatus()) || List.of("OCCUPIED", "BILL_REQUESTED").contains(status)))
 			throw ApiException.conflict("ACTIVE_ORDER", "An occupied table status is controlled by its active order");
 		table.setCode(code); table.setSeats(seats); table.setStatus(status);
 		try { return tableView(tables.saveAndFlush(table)); } catch (DataIntegrityViolationException ex) {
@@ -185,6 +188,9 @@ public class FloorService {
 	}
 
 	@Transactional
+	public void releaseAfterPayment(UUID tableId) { if(tableId!=null)tables.updateStatus(tableId,"FREE"); }
+
+	@Transactional
 	public void startCleaning(UUID tableId) {
 		requireStaff(); TableEntity table = requireActiveTable(tableId); requireOutletAccess(table.getOutletId());
 		if ("CLEANING".equals(table.getStatus())) return;
@@ -205,6 +211,15 @@ public class FloorService {
 		requireStaff();
 		if (tables.statusOf(tableId) == null) throw ApiException.notFound("TABLE", "Table not found");
 		tables.updateStatus(tableId, "FREE");
+	}
+
+	@Transactional
+	public Map<String,Object> reconcileOrphanedTables(UUID outletId) {
+		requireFloorManager(); requireOutletAccess(outletId);
+		TenantPrincipal p = TenantContext.require();
+		int repaired = tables.reconcileOrphanedOccupied(p.tenantId(), outletId);
+		if (repaired > 0) audit.write("ORPHANED_TABLES_RECONCILED", "OUTLET", outletId, "repaired=" + repaired);
+		return Map.of("outletId", outletId, "repaired", repaired);
 	}
 
 	public Map<String, Object> publicInfo(String token) {

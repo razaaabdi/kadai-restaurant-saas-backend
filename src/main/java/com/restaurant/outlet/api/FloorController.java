@@ -34,6 +34,9 @@ public class FloorController {
 	@GetMapping("/outlets/{outletId}/floor-layout")
 	public Map<String, Object> layout(@PathVariable UUID outletId) { return floor.floorLayout(outletId); }
 
+	@PostMapping("/outlets/{outletId}/tables/reconcile")
+	public Map<String,Object> reconcile(@PathVariable UUID outletId) { return floor.reconcileOrphanedTables(outletId); }
+
 	@GetMapping("/outlets/{outletId}/areas")
 	public java.util.List<Map<String, Object>> areas(@PathVariable UUID outletId) {
 		return floor.listAreas(outletId).stream().map(area -> Map.<String, Object>of("id", area.getId(), "name", area.getName(), "outletId", area.getOutletId())).toList();

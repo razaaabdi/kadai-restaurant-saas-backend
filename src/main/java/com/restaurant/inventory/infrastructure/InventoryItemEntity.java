@@ -22,7 +22,7 @@ public class InventoryItemEntity {
 	private BigDecimal minimumStock = BigDecimal.ZERO;
 	private BigDecimal reorderLevel = BigDecimal.ZERO;
 	private boolean active = true;
-	@Version private long version;
+	@Version private Long version;
 	private Instant createdAt = Instant.now();
 	private Instant updatedAt = Instant.now();
 
@@ -36,7 +36,7 @@ public class InventoryItemEntity {
 	public BigDecimal getMinimumStock() { return minimumStock; }
 	public BigDecimal getReorderLevel() { return reorderLevel; }
 	public boolean isActive() { return active; }
-	public long getVersion() { return version; }
+	public long getVersion() { return version == null ? 0 : version; }
 	public Instant getCreatedAt() { return createdAt; }
 	public Instant getUpdatedAt() { return updatedAt; }
 	public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }

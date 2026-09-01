@@ -6,6 +6,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.util.UUID;
+import java.time.Instant;
 
 @Entity
 @Table(name = "invoices")
@@ -14,6 +15,7 @@ public class InvoiceEntity {
 	private UUID tenantId;
 	private UUID outletId;
 	private UUID orderId;
+	private String invoiceNumber;
 	private String status = "GENERATED";
 	private long subtotalPaise;
 	private long discountPaise;
@@ -24,9 +26,12 @@ public class InvoiceEntity {
 	private long totalPaise;
 	private boolean taxInclusive;
 	private String roundingMode = "HALF_UP";
+	private Instant createdAt = Instant.now();
 	@Version private long version;
 	public UUID getId() { return id; }
 	public UUID getOrderId() { return orderId; }
+	public String getInvoiceNumber() { return invoiceNumber; }
+	public Instant getCreatedAt() { return createdAt; }
 	public String getStatus() { return status; }
 	public void setStatus(String status) { this.status = status; }
 	public long getTotalPaise() { return totalPaise; }

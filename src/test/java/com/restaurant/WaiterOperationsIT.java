@@ -9,7 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class WaiterOperationsIT extends AbstractIT {
 	@Test
 	@SuppressWarnings("unchecked")
-	void kitchenToWaiterToBillingToCleaningLifecycle() {
+	void kitchenToWaiterToBillingToAutomaticReleaseLifecycle() {
 		Http api = new Http("http://localhost:" + port);
 		Map<String,Object> onboard = api.post("/api/v1/onboarding", "{\"name\":\"Waiter Cafe\",\"slug\":\"waiter-cafe\",\"email\":\"waiter-owner@test.com\",\"password\":\"secret12\",\"ownerName\":\"Owner\"}");
 		String outletId = Http.uuid(onboard, "outletId");
@@ -49,11 +49,9 @@ class WaiterOperationsIT extends AbstractIT {
 			assertThat(billed.get("amountDuePaise")).isEqualTo(invoice.get("invoiceTotalPaise"));
 			api.post("/api/v1/payments", "{\"invoiceId\":\"" + Http.uuid(invoice,"invoiceId") + "\",\"method\":\"UPI\",\"amountPaise\":" + invoice.get("invoiceTotalPaise") + "}", UUID.randomUUID().toString());
 			Map<String,Object> paid = api.get("/api/v1/outlets/" + outletId + "/waiter/orders/" + orderId);
-			assertThat(paid).containsEntry("orderStatus","COMPLETED").containsEntry("tableStatus","CLEANING_REQUIRED").containsEntry("paymentStatus","PAID");
+			assertThat(paid).containsEntry("orderStatus","COMPLETED").containsEntry("tableStatus","FREE").containsEntry("invoiceStatus","PAID").containsEntry("paymentStatus","PAID");
 			List<Map<String,Object>> waiterOrders = (List<Map<String,Object>>) api.get("/api/v1/outlets/" + outletId + "/waiter/orders").get("list");
-		assertThat(waiterOrders).singleElement().satisfies(row -> assertThat(row.get("tableStatus")).isEqualTo("CLEANING_REQUIRED"));
-		api.post("/api/v1/tables/" + tableId + "/start-cleaning", "{}");
-		api.post("/api/v1/tables/" + tableId + "/complete-cleaning", "{}");
+		assertThat(waiterOrders).isEmpty();
 		List<Map<String,Object>> floor = (List<Map<String,Object>>) api.get("/api/v1/outlets/" + outletId + "/tables").get("list");
 		assertThat(floor).singleElement().satisfies(row -> assertThat(row.get("status")).isEqualTo("FREE"));
 	}
